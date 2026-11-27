@@ -70,7 +70,7 @@ assert edited["ok"], edited
 }
 ```
 
-정면을 향한 얼굴이 한 명 나온 사진을 사용한다. 첫 실행은 로컬 Python 3.12로 MediaPipe 실행 환경을 준비하고 Face Landmarker 모델을 캐시한다. `EXCAD_FACE_PYTHON`과 `EXCAD_FACE_MODEL`에는 기존 인터프리터와 모델 경로를 지정할 수 있다. 사진에서 측정한 비율 8개를 양쪽에 대응하는 MPFB 모프에 적용한다. 같은 인물에게 다른 사진을 적용하면 눈의 중심과 크기도 따라간다. [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)
+정면을 향한 얼굴이 한 명 나온 사진을 사용한다. 첫 실행은 로컬 Python 3.12로 MediaPipe 실행 환경을 준비하고 Face Landmarker 모델을 캐시한다. `EXCAD_FACE_PYTHON`과 `EXCAD_FACE_MODEL`에는 기존 인터프리터와 모델 경로를 지정할 수 있다. 사진에서 측정한 비율 8개를 양쪽에 대응하는 MPFB 모프에 적용한다. 다른 사진을 적용하면 눈의 중심과 크기도 바뀐다. 눈의 기준 형상을 파일에 보존하므로 두 사진을 번갈아 적용한 뒤 첫 사진으로 돌아오면 같은 눈 형상이 복원된다. [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)
 
 헤어, 상의, 겉옷, 하의와 신발은 슬롯별로 교체한다. `clothes: []`는 의상을 벗기고, `lashes: false`는 속눈썹을 제거한다. `iris_size`만 바꾸면 현재 홍채 색이 유지된다. 애드온 패널의 **Install CC0 character assets** 버튼과 `{"cmd":"install_asset_pack","pack":"all"}`은 시스템·셔츠·바지·치마 팩을 내려받아 해시를 확인한다. `equip_asset`에 `human`, `name`, 필요 시 `pack`을 주면 장착과 리핏을 실행한다. `EXCAD_CACHE`로 다운로드와 텍스처 미리보기의 캐시 위치를 지정할 수 있다. [MakeHuman 공식 에셋 팩](https://static.makehumancommunity.org/assets/assetpacks.html)
 

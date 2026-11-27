@@ -8,7 +8,7 @@ from pathlib import Path
 
 import bpy
 import numpy as np
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Quaternion, Vector
 
 from .character_stylizer import _pbr_mat, _vgroup_center
 from .face_fit import set_targets
@@ -986,15 +986,25 @@ def refit_eyes(human):
     for eye in eyes:
         center = centers[eye["excad_eye_side"]]
         old = Vector(eye["excad_eye_center"])
-        scale = radius / eye["excad_eye_radius"]
-        if (center - old).length < 1e-7 and abs(scale - 1) < 1e-7:
+        if (center - old).length < 1e-7 and abs(radius / eye["excad_eye_radius"] - 1) < 1e-7:
             continue
-        local = eye.matrix_world.inverted() @ human.matrix_world
         if eye.data.users > 1:
             eye.data = eye.data.copy()
-        eye.data.transform(
-            Matrix.Translation(local @ center) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-(local @ old))
-        )
+        if not eye.data.shape_keys:
+            eye.shape_key_add(name="Basis")
+        keys = eye.data.shape_keys
+        fitted = keys.key_blocks.get("EXCAD eye fit")
+        if fitted is None:
+            # Calibrate once from the saved eye, including meshes made by older versions.
+            fitted = eye.shape_key_add(name="EXCAD eye fit", from_mix=False)
+            eye["excad_eye_rest_center"] = list(old)
+            eye["excad_eye_rest_radius"] = eye["excad_eye_radius"]
+        local = eye.matrix_world.inverted() @ human.matrix_world
+        scale = radius / eye["excad_eye_rest_radius"]
+        offset = (local @ center) - (local @ Vector(eye["excad_eye_rest_center"])) * scale
+        for dest, source in zip(fitted.data, keys.reference_key.data):
+            dest.co = source.co * scale + offset
+        fitted.value = 1
         eye["excad_eye_center"], eye["excad_eye_radius"] = list(center), radius
 
 

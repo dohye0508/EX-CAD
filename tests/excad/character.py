@@ -185,6 +185,12 @@ for eye in eyes:
     assert np.allclose(eye["excad_eye_center"][:], centers[eye["excad_eye_side"]], atol=1e-6)
 assert np.max(np.abs(old_centers - np.array([o["excad_eye_center"][:] for o in eyes]))) > 1e-4
 
+# Alternating two fits must restore the evaluated eyes as precisely as the face.
+fitted_hash = run("scene_digest")["h"]
+apply_measurements(human, dict(fit["measurements"], eye_spacing=0.54))
+apply_measurements(human, dict(fit["measurements"], eye_spacing=0.30))
+assert run("scene_digest", since_hash=fitted_hash).get("unchanged")
+
 # The body, CC0 assets and tailored clothes do not all have the same direct
 # parent. A turn must preserve the posed geometry of the complete person.
 rig = human.find_armature()
