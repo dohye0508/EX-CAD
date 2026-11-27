@@ -8,7 +8,7 @@ Windows 저장소 루트에서 `cmd /c install_blender_addon.bat`를 실행한�
 
 MCP 클라이언트의 stdio 서버 명령에는 `python`을, 인수에는 저장소의 `excad_mcp_server.py` 절대 경로를 지정한다. `EXCAD_PORT`로 포트를 바꿀 수 있다.
 
-공식 Python MCP SDK 1.30.0의 `initialize`와 2.3.0의 `server/discover`로 각각 네 도구를 호출해 PNG와 장면 복원을 확인했다. 재현하려면 `EXCAD_TEST_MCP_PYTHONS`에 해당 SDK가 설치된 Python 실행 파일 경로를 설정한 뒤 아래 `layout.py` 테스트를 실행한다. Windows에서는 여러 경로를 `;`로 구분한다. [MCP 버전 협상 규격](https://modelcontextprotocol.io/docs/2026-07-28/learn/versioning)
+공식 Python MCP SDK 1.30.0의 `initialize`와 2.3.0의 `server/discover`로 각각 네 도구를 호출해 PNG와 장면 복원을 확인했다. TypeScript SDK 1.32.2와 2.4.0 클라이언트에서도 같은 네 도구를 호출했다. Python으로 재현하려면 `EXCAD_TEST_MCP_PYTHONS`에 해당 SDK가 설치된 Python 실행 파일 경로를 설정한 뒤 아래 `layout.py` 테스트를 실행한다. Windows에서는 여러 경로를 `;`로 구분한다. [MCP 버전 협상 규격](https://modelcontextprotocol.io/docs/2026-07-28/learn/versioning)
 
 | 도구 | 쓰임 |
 | --- | --- |
@@ -131,6 +131,8 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 
 같은 메시를 여러 번 배치하면 프리뷰가 각 인스턴스의 변환·재질을 적용하고 삼각형 검색 구조를 공유한다. Windows의 Blender 5.2.1에서 받침대와 색상이 다른 타원체 196개(삼각형 약 78만 개)를 검사한 두 번의 측정은 377 ms와 384 ms였다. 두 번 모두 겹친 한 쌍과 떠 있는 한 물체를 찾았다.
 
+생성한 인물과 불러온 GLB에는 텍스처의 검사용 축소본도 저장한다. 파일을 다시 열면 원본 이미지 내용, 색 공간, 알파 처리 방식이 일치하는 축소본을 사용한다. 아래 도자기 전시 장면을 네 번 각각 빈 캐시에서 열었을 때 첫 네 방향 프리뷰는 417~554 ms가 걸렸다. 기본 타일 크기는 160픽셀이다.
+
 `checkpoint`에 이름을 주고 편집한 뒤 `rollback`에 같은 이름을 보내면 활성 장면이 복원된다. `undo`는 최근 브리지 편집을 한 요청 단위로 되돌린다. 여러 단계가 있는 배치는 처음 실패한 단계에서 중지되며 그 전에 성공한 편집은 유지된다. 전체 배치를 되돌리려면 `undo`를 사용한다.
 
 ## Blender 백그라운드 검증
@@ -165,6 +167,9 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 | [SDF 꽃병](previews/phase3-sdf.png) · [20면 UV 복원](previews/phase3-uv.png) | 용기의 열린 입구와 내부 형상, 비대칭 유약 무늬의 정렬 |
 | [TRELLIS 입력](previews/trellis-reference.png) · [실제 생성 결과](previews/trellis-generated.png) | Cycles로 렌더한 꽃병에서 생성한 GLB. 색상은 반영됐으며 좁은 목과 굴곡은 원통에 가깝게 단순화됐다. |
 | [받침대 위 화분](previews/phase4-layout.png) | 서로 다른 두 물체의 접지, 목재와 도자기 재질, 스튜디오 조명 |
+| [도자기 전시 장면의 Cycles 렌더](previews/ceramics-exhibit.png) | 사진 피팅 인물, CAD 받침대 두 개, SDF 그릇, TRELLIS 꽃병을 한 장면에 조립한 결과 |
+
+전시 장면에서 왼쪽 받침대의 `height.depth`를 0.72에서 0.81로 바꾸고 SDF 그릇의 입구를 넓힌 뒤 `place_relative`로 다시 접지했다. 저장한 파일을 다시 연 상태에서 공식 MCP 클라이언트로 편집했고, 그릇 바닥의 높이 0.81과 롤백 후 원래 장면 해시를 확인했다.
 
 TRELLIS 실측은 공개 Gradio 모델 서버에 합성 꽃병 이미지 한 장을 보낸 결과다. 생성과 다운로드에는 75.8초가 걸렸다. Blender에서 텍스처 경계의 정점을 연결한 결과 정점 5,885개·삼각형 11,766개이며 열린 경계와 비매니폴드 모서리는 0개였다. [검증에 사용한 TRELLIS 서버](https://huggingface.co/spaces/trellis-community/TRELLIS)
 
