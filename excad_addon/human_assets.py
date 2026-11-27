@@ -62,7 +62,8 @@ def styling_packs(options):
     if isinstance(clothing, str):
         clothing = [clothing]
     needed = {CLOTHES[item][0] for item in clothing if item in CLOTHES}
-    if isinstance(options.get("hair"), str) or any(options.get(k) for k in ("skin", "lip_tint", "lashes", "teeth")):
+    portrait_assets = ("skin", "lip_tint", "lashes", "teeth", "eyes", "iris_color", "iris_size")
+    if isinstance(options.get("hair"), str) or any(options.get(k) for k in portrait_assets):
         needed.add("system")
     return sorted(needed)
 

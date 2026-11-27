@@ -771,48 +771,92 @@ def skin(human, tone, lip_tint):
     warm_materials(human)
 
 
+def _eye_materials(human, iris_color):
+    from .human_assets import install_asset_pack
+
+    atlas = install_asset_pack("system") / "eyes" / "materials" / "grey_eye.png"
+    image = bpy.data.images.load(str(atlas), check_existing=True)
+    white = _pbr_mat("EXCAD Sclera", (0.82, 0.84, 0.80), 0.31)
+    iris = _pbr_mat(human.name + " Iris", iris_color, 0.30)
+    pupil = _pbr_mat("EXCAD Pupil", (0.003, 0.004, 0.005), 0.28)
+    # Mean linear RGB sampled across the grey iris before applying its requested tint.
+    iris_factor = [v / average for v, average in zip(iris_color, (0.2475, 0.3086, 0.2677))]
+    for mat, factor in ((white, (1.40, 1.44, 1.42)), (iris, iris_factor), (pupil, None)):
+        nodes = mat.node_tree.nodes
+        bsdf = nodes.get("Principled BSDF")
+        bsdf.inputs["Specular IOR Level"].default_value = 0.22
+        bsdf.inputs["Coat Weight"].default_value = 1.0
+        bsdf.inputs["Coat Roughness"].default_value = 0.045
+        bsdf.inputs["Coat IOR"].default_value = 1.336
+        if factor is not None:
+            tex = nodes.get("Eye atlas") or nodes.new("ShaderNodeTexImage")
+            tex.name, tex.image = "Eye atlas", image
+            tint = nodes.get("Eye pigmentation") or nodes.new("ShaderNodeVectorMath")
+            tint.name, tint.operation = "Eye pigmentation", "MULTIPLY"
+            tint.inputs[1].default_value = factor
+            mat["excad_albedo_multiplier"] = factor
+            mat.node_tree.links.new(tex.outputs["Color"], tint.inputs[0])
+            mat.node_tree.links.new(tint.outputs[0], bsdf.inputs["Base Color"])
+    return white, iris, pupil
+
+
 def eyes(human, iris_color, iris_size):
     if not 0.2 <= iris_size <= 0.75:
         raise ValueError("iris_size is the fraction of eyeball radius, from 0.2 to 0.75")
-    white = _pbr_mat("EXCAD Sclera", (0.82, 0.84, 0.80), 0.18)
-    iris = _pbr_mat(human.name + " Iris", iris_color, 0.18)
-    pupil = _pbr_mat("EXCAD Pupil", (0.005, 0.006, 0.007), 0.1)
+    white, iris, pupil = _eye_materials(human, iris_color)
     with rest_mesh(human) as mesh:
         centers = _eye_centers(human, mesh)
     radius = (centers[0] - centers[1]).length * 0.194
+    edge = math.asin(iris_size)
+    # Each ring carries its polar angle, its source radius in atlas pixels,
+    # and the material on the band connecting it to the previous ring.
+    rings = [
+        (math.asin(iris_size * f), px, slot)
+        for f, px, slot in ((0.32, 32, 2), (0.5, 54, 1), (0.75, 83, 1), (1.0, 119, 1))
+    ]
+    for i in range(1, 25):
+        theta = edge + (math.pi - edge) * i / 25
+        progress = min(1.0, (theta - edge) / (math.pi / 2 - edge))
+        rings.append((theta, 119 + 153 * progress, 0))
+
     result = []
+    sectors = 40
     for side, center in enumerate(centers):
-        # Latitude rings around the gaze axis align the pupil and iris boundaries.
-        angles = [0, math.asin(iris_size * 0.43), math.asin(iris_size)]
-        edge = angles[-1]
-        angles.extend(edge + (math.pi - edge) * j / 24 for j in range(1, 25))
-        coords = [center + Vector((0, -radius, 0))]
+        cx, cy = ((300.5, 1024 - 718.5), (723.5, 1024 - 303.5))[side]
+        coords = [center + Vector((0, -radius * 1.04, 0))]
+        texcoords = [(cx / 1024, cy / 1024)]
         faces, slots = [], []
-        n = 40
-        for j, theta in enumerate(angles[1:-1]):
-            for i in range(n):
-                phi = math.tau * i / n
-                coords.append(
-                    center
-                    + radius
-                    * Vector((math.sin(theta) * math.cos(phi), -math.cos(theta), math.sin(theta) * math.sin(phi)))
-                )
-                a, b = 1 + j * n + i, 1 + j * n + (i + 1) % n
-                faces.append((0, a, b) if j == 0 else (a - n, a, b, b - n))
-                slots.append(2 if j == 0 else 1 if j == 1 else 0)
+        for j, (theta, atlas_radius, slot) in enumerate(rings):
+            ring = math.sin(theta)
+            bulge = 0.04 * (1 - (ring / iris_size) ** 2) ** 2 if theta < edge else 0
+            for i in range(sectors):
+                phi = math.tau * i / sectors
+                x, z = math.cos(phi), math.sin(phi)
+                coords.append(center + radius * Vector((ring * x, -math.cos(theta) - bulge, ring * z)))
+                texcoords.append(((cx + atlas_radius * x) / 1024, (cy + atlas_radius * z) / 1024))
+                a, b = 1 + j * sectors + i, 1 + j * sectors + (i + 1) % sectors
+                faces.append((0, a, b) if j == 0 else (a - sectors, a, b, b - sectors))
+                slots.append(slot)
         end = len(coords)
         coords.append(center + Vector((0, radius, 0)))
-        for i in range(n):
-            faces.append((end - n + i, end, end - n + (i + 1) % n))
+        for i in range(sectors):
+            faces.append((end - sectors + i, end, end - sectors + (i + 1) % sectors))
             slots.append(0)
         obj = _object(human, "Portrait eye", coords, faces, white)
         obj.data.materials.append(iris)
-        obj["excad_eye_side"], obj["excad_eye_center"], obj["excad_eye_radius"] = side, list(center), radius
         obj.data.materials.append(pupil)
-        for p, slot in zip(obj.data.polygons, slots):
-            p.material_index = slot
+        obj["excad_eye_side"], obj["excad_eye_center"], obj["excad_eye_radius"] = side, list(center), radius
+        uv = obj.data.uv_layers.new(name="Eye atlas")
+        for face, slot in zip(obj.data.polygons, slots):
+            face.material_index = slot
+            for loop, idx in zip(face.loop_indices, face.vertices):
+                # The rear pole stays on the sclera in each sector of the atlas.
+                uv.uv[loop].vector = texcoords[idx if idx != end else face.vertices[0]]
         head_weight(obj, human)
         result.append(obj)
+    from .inspect_shading import warm_materials
+
+    warm_materials(result[0])
     return result
 
 

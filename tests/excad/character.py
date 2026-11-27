@@ -152,6 +152,20 @@ from excad_addon.face_fit import apply_measurements
 from excad_addon.wardrobe import _eye_centers, rest_mesh
 
 eyes = [o for o in bpy.context.scene.objects if "excad_eye_side" in o]
+assert len(eyes) == 2
+for eye in eyes:
+    uv = eye.data.uv_layers.active
+    assert uv and uv.name == "Eye atlas"
+    assert {p.material_index for p in eye.data.polygons} == {0, 1, 2}
+    center = np.asarray(eye["excad_eye_center"])
+    front = min(v.co.y for v in eye.data.vertices)
+    assert np.isclose(center[1] - front, 1.04 * eye["excad_eye_radius"], rtol=1e-4)
+    for mat in list(eye.data.materials)[:2]:
+        assert mat.node_tree.nodes["Eye atlas"].image.size[:] == (1024, 1024)
+        assert mat.node_tree.nodes["Principled BSDF"].inputs["Coat Weight"].default_value > 0.9
+    first_uv = np.asarray(uv.uv[0].vector)
+    rim_uv = np.asarray(uv.uv[1].vector)
+    assert np.isclose(np.linalg.norm(first_uv - rim_uv) * 1024, 32, atol=0.01)
 old_centers = np.array([o["excad_eye_center"][:] for o in eyes])
 apply_measurements(human, dict(fit["measurements"], eye_spacing=0.30))
 with rest_mesh(human) as mesh:
