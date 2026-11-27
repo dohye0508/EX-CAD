@@ -15,7 +15,11 @@ def _feed(h, value):
 def _pixels(image):
     import os
 
-    path = os.path.normcase(bpy.path.abspath(image.filepath, library=image.library)) if image.filepath else ""
+    path = (
+        os.path.normcase(os.path.abspath(bpy.path.abspath(image.filepath, library=image.library)))
+        if image.filepath
+        else ""
+    )
     h = hashlib.blake2s(digest_size=8)
     _feed(h, [path, list(image.size), image.colorspace_settings.name, image.alpha_mode])
     if image.is_dirty or image.source == "GENERATED":
@@ -124,7 +128,9 @@ def rows(include_all=False):
                         data = np.empty(len(items) * n, dtype=dtype)
                         items.foreach_get(prop, data)
                         h.update(data.tobytes())
-                    for mat in mesh.materials:
+                    from .scene_mesh import resolved_materials
+
+                    for mat in resolved_materials(mesh, ev):
                         if mat:
                             if mat.name not in materials:
                                 materials[mat.name] = _material(mat, images)

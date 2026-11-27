@@ -120,6 +120,102 @@ with tempfile.TemporaryDirectory() as tmp:
     assert np.std(values.reshape(-1, 4)[:, :3]) > 0.10
     print("UV BAKE", atlas["resolution"], atlas["views_used"], flush=True)
 
+    # A four-color registration chart detects upside-down images, swapped axes
+    # and incorrect color-space conversion independently of Blender's UV packing.
+    chart = directory / "chart"
+    chart.mkdir()
+    face = next(f for f in polyhedron_engine.get_polyhedron_faces("CUBE_6") if f["normal"][2] > 0.99)
+    colors = [[202, 43, 25], [37, 170, 66], [24, 77, 215], [244, 177, 41]]
+    source_pixels = np.full((64, 64, 3), 255, np.uint8)
+    for slices, color in zip(
+        [
+            (slice(4, 32), slice(4, 32)),
+            (slice(4, 32), slice(32, 60)),
+            (slice(32, 60), slice(4, 32)),
+            (slice(32, 60), slice(32, 60)),
+        ],
+        colors,
+    ):
+        source_pixels[slices] = color
+    _png(chart / face["filename"], source_pixels)
+    bpy.ops.mesh.primitive_plane_add(size=1)
+    board = bpy.context.object
+    board.name = "Registration chart"
+    original = board.data
+    linked = board.copy()
+    bpy.context.collection.objects.link(linked)
+    prior_material = bpy.data.materials.new("Original chart stock")
+    original.materials.append(prior_material)
+    original.vertices[0].select = False
+    board.select_set(False)
+    vase.select_set(True)
+    bpy.context.view_layer.objects.active = vase
+    options = dict(object=board.name, image_dir=str(chart), size=1.5, texture_size=256, poly_type="CUBE_6")
+    failed = bridge._dispatch_dict(dict(options, cmd="poly_bake", center=[99, 99, 99]))
+    assert not failed["ok"] and board.data == linked.data == original
+    assert "EXCAD Atlas" not in original.uv_layers and list(original.materials) == [prior_material]
+    options["center"] = [0, 0, 0]
+    baked = run("poly_bake", **options)
+    assert board.data != linked.data and list(linked.data.materials) == [prior_material]
+    assert (
+        not board.data.vertices[0].select and not board.select_get() and bpy.context.view_layer.objects.active == vase
+    )
+    counts = (len(bpy.data.images), len(bpy.data.materials), len(bpy.data.meshes))
+    baked = run("poly_bake", **options)
+    assert counts == (len(bpy.data.images), len(bpy.data.materials), len(bpy.data.meshes))
+    material = board.active_material
+    texture = material.node_tree.nodes["Image Texture"].image
+    pixels = np.empty((256, 256, 4), np.float32)
+    texture.pixels.foreach_get(pixels.ravel())
+    mesh = board.data
+    mesh.calc_loop_triangles()
+    from excad_addon.inspect_shading import Shading
+    from excad_addon.scene_mesh import surfaces
+
+    other_uv = mesh.uv_layers.new(name="Unused map")
+    mesh.uv_layers.active = other_uv
+    other_uv.active_render = True
+    shading = Shading(surfaces(board.name, shading=True))
+    for (u, v), color in zip([(-0.20, 0.17), (0.20, 0.17), (-0.20, -0.17), (0.20, -0.17)], colors):
+        point = np.array(face["right"]) * u + np.array(face["up"]) * v
+        for tri in mesh.loop_triangles:
+            vertices = np.array([mesh.vertices[i].co[:2] for i in tri.vertices])
+            coefficients = np.linalg.solve(np.vstack((vertices.T, np.ones(3))), [*point[:2], 1])
+            if min(coefficients) >= 0:
+                coords = np.array([mesh.uv_layers["EXCAD Atlas"].uv[i].vector[:] for i in tri.loops])
+                x, y = (coefficients @ coords * 256).astype(int)
+                break
+        else:
+            raise AssertionError("Registration mark is outside the chart")
+        srgb = np.array(color) / 255
+        assert np.allclose(pixels[y, x, :3], srgb, atol=1 / 255), (u, v, pixels[y, x], srgb)
+        expected = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+        _, sampled, _ = shading.sample(np.array([tri.index]), np.array([point]))
+        assert np.allclose(sampled[0], expected, atol=0.009), (u, v, sampled, expected)
+    # Failure at the final file replacement must restore the previous atlas
+    # and material, and must not leave a new Blender image or a temporary file.
+    occupied = chart / "directory.png"
+    occupied.mkdir()
+    files_before = set(chart.iterdir())
+    contents = Path(baked["path"]).read_bytes()
+    failed = bridge._dispatch_dict(dict(options, cmd="poly_bake", path=str(occupied)))
+    assert not failed["ok"] and board.active_material == material
+    assert Path(baked["path"]).read_bytes() == contents and set(chart.iterdir()) == files_before
+    assert counts == (len(bpy.data.images), len(bpy.data.materials), len(bpy.data.meshes))
+    # Explicitly bypass depth when it is unrelated to the source color chart.
+    depth_file = chart / face["filename"].replace(".png", "_depth.png")
+    _png(depth_file, np.zeros((5, 5, 3), np.uint8))
+    assert run("poly_bake", use_depth=False, **options)["views_used"] == 1
+    assert not bridge._dispatch_dict(dict(options, cmd="poly_bake"))["ok"]
+    selection = list(bpy.context.selected_objects)
+    before = (set(bpy.data.objects), set(bpy.data.meshes))
+    failure = bridge._dispatch_dict(
+        dict(opt, cmd="poly_reconstruct", name="Failed reconstruction", project_colors=True, texture_size=143)
+    )
+    assert not failure["ok"] and before == (set(bpy.data.objects), set(bpy.data.meshes))
+    assert bpy.context.view_layer.objects.active == vase and list(bpy.context.selected_objects) == selection
+    print("UV REGISTRATION AND RECOVERY PASS", flush=True)
+
     glb = directory / "fixture.glb"
     for o in bpy.context.selected_objects:
         o.select_set(False)

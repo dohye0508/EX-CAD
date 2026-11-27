@@ -64,6 +64,14 @@ class Surface:
         return self._hem
 
 
+def resolved_materials(mesh, evaluated):
+    slots = evaluated.material_slots
+    return [
+        slots[i].material if i < len(slots) and slots[i].link == "OBJECT" else mat
+        for i, mat in enumerate(mesh.materials)
+    ]
+
+
 def read_surface(obj, graph, shading=False):
     evaluated = obj.evaluated_get(graph)
     mesh = evaluated.to_mesh()
@@ -75,15 +83,28 @@ def read_surface(obj, graph, shading=False):
         mesh.vertices.foreach_get("co", coords.ravel())
         matrix = np.asarray(evaluated.matrix_world, dtype=np.float32)
         points = coords @ matrix[:3, :3].T + matrix[:3, 3]
-        triangles = np.empty((len(mesh.loop_triangles), 3), np.int32)
-        mesh.loop_triangles.foreach_get("vertices", triangles.ravel())
+        corners = np.empty((len(mesh.loop_triangles), 3), np.int32)
+        mesh.loop_triangles.foreach_get("loops", corners.ravel())
+        vertex_ids = np.empty(len(mesh.loops), np.int32)
+        mesh.attributes[".corner_vert"].data.foreach_get("value", vertex_ids)
+        triangles = vertex_ids[corners]
         slots = np.empty(len(triangles), np.int32)
-        mesh.loop_triangles.foreach_get("material_index", slots)
+        assignment = mesh.attributes.get("material_index")
+        if assignment and len(mesh.materials) > 1:
+            material_ids = np.empty(len(mesh.polygons), np.int32)
+            assignment.data.foreach_get("value", material_ids)
+            mesh.loop_triangles.foreach_get("polygon_index", slots)
+            slots = material_ids[slots]
+        else:
+            slots.fill(0)
         base = (0.42, 0.57, 0.70)
-        palette = [tuple(m.diffuse_color[:3]) if m else base for m in mesh.materials] or [base]
+        materials = resolved_materials(mesh, evaluated)
+        from .inspect_shading import material_color
+
+        palette = [material_color(m, base) for m in materials] or [base]
         colors = np.asarray(palette, dtype=np.float32)[np.clip(slots, 0, len(palette) - 1)]
         indices = np.empty(len(mesh.loops), np.int32)
-        mesh.loops.foreach_get("edge_index", indices)
+        mesh.attributes[".corner_edge"].data.foreach_get("value", indices)
         count = np.bincount(indices, minlength=len(mesh.edges))
         boundary_vertices = None
         if shading and obj.get("excad_slot") in {"top", "outerwear", "bottom", "footwear"}:
@@ -100,7 +121,7 @@ def read_surface(obj, graph, shading=False):
         if shading:
             from .inspect_shading import surface_shading
 
-            detail = surface_shading(mesh, matrix, slots)
+            detail = surface_shading(mesh, matrix, slots, materials, corners, triangles)
         return Surface(
             obj,
             points,

@@ -52,6 +52,7 @@ def _finish(obj, preset, color, roughness, metallic):
     shader.inputs["Metallic"].default_value = metallic
     slots.clear()
     slots.append(mat)
+    obj.material_slots[0].link = "DATA"
     return mat.name
 
 

@@ -8,12 +8,14 @@ import tempfile
 import time
 import zlib
 
+import bpy
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 from . import scene_mesh
 from .inspect_shading import Shading
+from .image_colors import linear_to_srgb
 
 DIRECTIONS = {"FRONT": (0, -1, 0), "SIDE": (1, 0, 0), "ISO": (1.15, -1.65, 1.05), "TOP": (0, 0, 1)}
 # Five-pixel labels keep the orientations legible in the standalone PNG.
@@ -80,7 +82,7 @@ def _tile(tree, bounds, shading, view, size):
         visible = alpha >= 0.4
         intensity = 0.33 + 0.67 * np.maximum(0, normals[visible] @ np.asarray(light))
         linear = colors[visible] * intensity[:, None]
-        rgb[y[visible], x[visible]] = np.clip(255 * np.maximum(0, linear) ** (1 / 2.2), 0, 255).astype(np.uint8)
+        rgb[y[visible], x[visible]] = np.clip(255 * linear_to_srgb(linear), 0, 255).astype(np.uint8)
         y, x = y[~visible], x[~visible]
         # See the face behind transparent hair and eyelash cards.
         for j, i in zip(y, x):
@@ -244,13 +246,21 @@ def render_inspect(target="ALL", views=("FRONT", "SIDE", "ISO", "TOP"), path=Non
     for i, view in enumerate(views):
         y, x = (i // 2) * (size + 2), (i % 2) * (size + 2)
         grid[y : y + size, x : x + size] = _tile(tree, bounds, shading, view, size)
-    if path is None:
-        with tempfile.NamedTemporaryFile(prefix="excad-inspect-", suffix=".png", delete=False) as tmp:
-            path = tmp.name
-    dest = Path(path).resolve()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    _png(dest, grid)
     warnings, contacts, topology = _diagnostics(items)
+    dest = Path(bpy.path.abspath(path)).resolve() if path else None
+    directory = dest.parent if dest else Path(tempfile.gettempdir())
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=directory, prefix="excad-inspect-", suffix=".png", delete=False) as tmp:
+        pending = Path(tmp.name)
+    try:
+        _png(pending, grid)
+        if dest is not None:
+            pending.replace(dest)
+        else:
+            dest = pending
+    except Exception:
+        pending.unlink(missing_ok=True)
+        raise
     result = {
         "path": str(dest),
         "views": list(views),

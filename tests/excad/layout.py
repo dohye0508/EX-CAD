@@ -191,6 +191,19 @@ before = run("scene_digest")["h"]
 color.data[0].color = (0.85, 0.15, 0.12, 1)
 assert {r[0] for r in run("scene_digest", since_hash=before)["changed"]} == linked_parts
 
+# Object-linked material slots belong to a single instance of a shared mesh.
+override = bpy.data.materials.new("Instance paint")
+override.use_nodes = True
+override.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (0.05, 0.32, 0.74, 1)
+before = run("scene_digest")["h"]
+obj.material_slots[0].link = "OBJECT"
+obj.material_slots[0].material = override
+assert {r[0] for r in run("scene_digest", since_hash=before)["changed"]} == {obj.name}
+from excad_addon.scene_mesh import surfaces
+import numpy as np
+
+assert np.allclose(surfaces(obj.name, shading=True)[0].colors[0], [0.05, 0.32, 0.74])
+
 # A separate arrangement for the public four-view inspection.
 for name in [*placed, "Slope", "Small"]:
     bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True)

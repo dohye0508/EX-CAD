@@ -200,12 +200,17 @@ def render_polyhedron_views(
 
 
 def _load_rgba_and_mask(image_path: str, threshold: float = 0.15):
-    existing = set(bpy.data.images.keys())
-    img = bpy.data.images.load(image_path, check_existing=True)
-    w, h = img.size[0], img.size[1]
-    arr = np.empty((h, w, 4), dtype=np.float32)
-    img.pixels.foreach_get(arr.ravel())
-    if img.name not in existing:
+    from .image_colors import has_srgb_bytes, srgb_to_linear
+
+    img = bpy.data.images.load(image_path, check_existing=False)
+    try:
+        w, h = img.size
+        if w == 0 or h == 0:
+            raise ValueError(f"Empty projection image: {image_path}")
+        arr = np.empty((h, w, 4), dtype=np.float32)
+        img.pixels.foreach_get(arr.ravel())
+        encoded = has_srgb_bytes(img)
+    finally:
         bpy.data.images.remove(img)
 
     alpha = arr[:, :, 3]
@@ -218,7 +223,8 @@ def _load_rgba_and_mask(image_path: str, threshold: float = 0.15):
         bg = np.median(border_rgb, axis=0)
         dist = np.linalg.norm(rgb - bg[None, None, :], axis=2)
         mask = dist > float(threshold)
-    return arr[:, :, :3], mask
+    rgb = arr[:, :, :3]
+    return (srgb_to_linear(rgb) if encoded else rgb), mask
 
 
 def _extract_voxel_surface_bmesh(inside: np.ndarray, origin: tuple[float, float, float], step: float) -> bmesh.types.BMesh:
@@ -293,7 +299,7 @@ def project_colors_to_mesh(
     local_no = np.empty(n_verts * 3, dtype=np.float32)
     mesh.vertices.foreach_get("normal", local_no)
     local_no = local_no.reshape((n_verts, 3))
-    world_no = local_no @ rot_mat.T
+    world_no = local_no @ np.linalg.pinv(rot_mat)
     norms = np.linalg.norm(world_no, axis=1, keepdims=True)
     world_no = world_no / np.maximum(norms, 1e-8)
 
@@ -364,9 +370,14 @@ def reconstruct_from_polyhedron_views(
     project_colors: bool = True,
     name: str = "EXCAD_PolyMesh",
     use_depth: bool = True,
-    texture_mode: str = "VERTEX",
+    texture_mode: str = "UV",
     texture_size: int = 2048,
 ):
+    if bpy.context.mode != "OBJECT" or not np.isfinite(size) or size <= 0:
+        raise ValueError("Reconstruction needs a positive size in Object Mode")
+    if texture_mode.upper() not in {"UV", "VERTEX"}:
+        raise ValueError("Use UV or VERTEX texture mode")
+    image_dir = bpy.path.abspath(image_dir)
     faces = get_polyhedron_faces(poly_type)
     views = []
     for f in faces:
@@ -413,34 +424,47 @@ def reconstruct_from_polyhedron_views(
         raise RuntimeError("Visual Hull intersection is empty; check background threshold or image alignment")
 
     origin = (center[0] - half, center[1] - half, center[2] - half)
+    selected = list(bpy.context.selected_objects)
+    active = bpy.context.view_layer.objects.active
     bm = _extract_voxel_surface_bmesh(inside_3d, origin, step)
     mesh = bpy.data.meshes.new(name)
-    bm.to_mesh(mesh)
-    bm.free()
+    obj = None
+    try:
+        try:
+            bm.to_mesh(mesh)
+        finally:
+            bm.free()
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        for other in selected:
+            other.select_set(False)
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        obj.data.remesh_voxel_size = step * 1.15
+        if "FINISHED" not in bpy.ops.object.voxel_remesh() or not obj.data.polygons:
+            raise ValueError("Voxel remeshing produced no surface")
 
-    obj = bpy.data.objects.new(name, mesh)
-    bpy.context.collection.objects.link(obj)
-    for o in bpy.context.selected_objects:
-        o.select_set(False)
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
+        if smooth_iters > 0:
+            mod = obj.modifiers.new("EXCAD_Smooth", 'SMOOTH')
+            mod.factor = 0.5
+            mod.iterations = int(smooth_iters)
+            bpy.ops.object.modifier_apply(modifier=mod.name)
 
-    obj.data.remesh_voxel_size = max(0.008, step * 1.15)
-    bpy.ops.object.voxel_remesh()
+        for poly in obj.data.polygons:
+            poly.use_smooth = True
 
-    if smooth_iters > 0:
-        mod = obj.modifiers.new("EXCAD_Smooth", 'SMOOTH')
-        mod.factor = 0.5
-        mod.iterations = int(smooth_iters)
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-
-    for poly in obj.data.polygons:
-        poly.use_smooth = True
-
-    if project_colors and texture_mode.upper() == "UV":
-        from .uv_bake import bake
-        bake(obj, image_dir, poly_type, center, size, texture_size, threshold=threshold)
-    elif project_colors:
-        project_colors_to_mesh(obj, poly_type=poly_type, image_dir=image_dir, size=size, center=center, threshold=threshold)
-
-    return obj, len(views)
+        if project_colors and texture_mode.upper() == "UV":
+            from .uv_bake import bake
+            bake(obj, image_dir, poly_type, center, size, texture_size, threshold=threshold, use_depth=use_depth)
+        elif project_colors:
+            project_colors_to_mesh(obj, poly_type=poly_type, image_dir=image_dir, size=size, center=center, threshold=threshold)
+        return obj, len(views)
+    except Exception:
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+        for other in selected:
+            other.select_set(True)
+        bpy.context.view_layer.objects.active = active
+        raise

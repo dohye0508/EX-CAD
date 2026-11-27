@@ -2,89 +2,188 @@
 """Compact material/normal samples for diagnostic ray casts in the headless inspector."""
 
 from collections import OrderedDict
+import hashlib
+import os
 from pathlib import Path
+import tempfile
 
 import bpy
 import numpy as np
 
+from .image_colors import has_srgb_bytes, srgb_to_linear
+
 _thumbnails = OrderedDict()
 
 
-def _texture(mat):
+def _base_color_socket(mat):
+    if mat and mat.use_nodes:
+        for shader in mat.node_tree.nodes:
+            if shader.type == "BSDF_PRINCIPLED" and shader.outputs[0].is_linked:
+                return shader.inputs["Base Color"]
+    return None
+
+
+def material_color(mat, fallback=(0.42, 0.57, 0.70)):
+    if not mat:
+        return fallback
+    socket = _base_color_socket(mat)
+    return socket.default_value[:3] if socket and not socket.is_linked else mat.diffuse_color[:3]
+
+
+def _texture_node(mat):
     if not mat or not mat.use_nodes:
         return None
+    socket = _base_color_socket(mat)
+    if socket is not None:
+        queue = [link.from_node for link in socket.links]
+        seen = set()
+        while queue:
+            node = queue.pop(0)
+            if node in seen:
+                continue
+            seen.add(node)
+            if node.type == "TEX_IMAGE" and node.image:
+                return node
+            queue.extend(link.from_node for input in node.inputs for link in input.links)
+        if not socket.is_linked:
+            return None
+    # MPFB and other imported shaders can wrap their color inputs in node groups.
     images = []
     for node in mat.node_tree.nodes:
-        image = getattr(node, "image", None)
-        if node.type != "TEX_IMAGE" or image is None:
+        if node.type != "TEX_IMAGE" or not node.image:
             continue
-        label = (node.name + " " + node.label + " " + image.name).lower()
+        label = (node.name + " " + node.label + " " + node.image.name).lower()
         if any(s in label for s in ("normal", "roughness", "bump", "displacement", "specular", "metallic", "opacity")):
             continue
         score = 2 if any(s in label for s in ("diffuse", "albedo", "base color", "basecolor")) else 1
-        images.append((score, image))
+        images.append((score, node))
     return max(images, key=lambda x: x[0])[1] if images else None
 
 
-def thumbnail(image):
-    if image is None or not image.size[0]:
+def _thumbnail_file(path, revision, colorspace, alpha_mode):
+    root = os.getenv("EXCAD_CACHE") or bpy.utils.user_resource("DATAFILES", path="excad")
+    identity = (os.path.normcase(str(path.resolve())), revision, colorspace, alpha_mode)
+    name = hashlib.sha256(repr(identity).encode("utf8")).hexdigest()
+    return Path(root) / "thumbnails-v1" / (name + ".npy")
+
+
+def _store_thumbnail(path, pixels):
+    pending = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as out:
+            pending = Path(out.name)
+            np.save(out, pixels.astype(np.float16), allow_pickle=False)
+        pending.replace(path)
+    except OSError:
+        pass
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
+def thumbnail(image, persist=False):
+    if image is None:
         return None
+    colorspace = image.colorspace_settings.name
+    path = None
     revision = None
-    if image.source == "FILE" and image.filepath and not image.packed_file:
+    can_read_file = image.source == "FILE" and not image.is_dirty
+    if can_read_file and image.filepath and not image.packed_file:
+        path = Path(bpy.path.abspath(image.filepath, library=image.library))
         try:
-            revision = Path(bpy.path.abspath(image.filepath, library=image.library)).stat().st_mtime_ns
+            stat = path.stat()
+            revision = stat.st_size, stat.st_mtime_ns
         except OSError:
-            pass
-    key = image.session_uid, tuple(image.size), image.filepath, revision
+            path = None
+    key = image.session_uid, image.filepath, revision, colorspace, image.alpha_mode
     if not image.is_dirty and key in _thumbnails:
         _thumbnails.move_to_end(key)
         return _thumbnails[key]
-    duplicate = None
-    try:
-        original = image
-        if max(image.size) > 384 and not image.is_dirty:
-            duplicate = image.copy()
-            w, h = image.size
-            duplicate.scale(max(1, round(w * 384 / max(w, h))), max(1, round(h * 384 / max(w, h))))
-            image = duplicate
+
+    pixels = None
+    cached = _thumbnail_file(path, revision, colorspace, image.alpha_mode) if path else None
+    if cached and cached.is_file():
+        try:
+            array = np.load(cached, allow_pickle=False, mmap_mode="r")
+            if array.ndim == 3 and array.shape[2] == 4 and max(array.shape[:2]) <= 384 and array.dtype == np.float16:
+                pixels = array.astype(np.float32)
+        except (OSError, ValueError, EOFError):
+            pass
+    restored = pixels is not None
+    if pixels is None and can_read_file and (path or image.packed_file) and colorspace in {"sRGB", "Non-Color"}:
+        # Access a thumbnail directly, without decoding a second copy into Blender's
+        # image database. Packed and external images use Blender's own file decoder.
+        import imbuf
+
+        buffer = None
+        try:
+            buffer = imbuf.load(str(path)) if path else imbuf.load_from_buffer(image.packed_file.data)
+            w, h = buffer.size
+            if buffer.buffer_type == "BYTE" and buffer.channels == 4:
+                if max(w, h) > 384:
+                    buffer.resize(
+                        (max(1, round(w * 384 / max(w, h))), max(1, round(h * 384 / max(w, h)))), method="BILINEAR"
+                    )
+                with buffer.with_buffer() as view:
+                    pixels = np.asarray(view, dtype=np.float32) / 255
+                if colorspace == "sRGB":
+                    pixels[:, :, :3] = srgb_to_linear(pixels[:, :, :3])
+        except (OSError, ValueError, RuntimeError):
+            pass
+        finally:
+            if buffer is not None:
+                buffer.free()
+    if pixels is None:
         w, h = image.size
+        if not w or not h:
+            return None
         pixels = np.empty((h, w, 4), np.float32)
         image.pixels.foreach_get(pixels.ravel())
         if max(w, h) > 384:
             stride = (max(w, h) + 383) // 384
             pixels = pixels[::stride, ::stride].copy()
-        # Generated and packed images also pass through Blender's colorspace conversion.
-        if not original.is_dirty:
-            _thumbnails[key] = pixels
-            if len(_thumbnails) > 24:
-                _thumbnails.popitem(last=False)
-        return pixels
-    finally:
-        if duplicate:
-            bpy.data.images.remove(duplicate)
+        if has_srgb_bytes(image):
+            pixels[:, :, :3] = srgb_to_linear(pixels[:, :, :3])
+    if not image.is_dirty:
+        _thumbnails[key] = pixels
+        if len(_thumbnails) > 24:
+            _thumbnails.popitem(last=False)
+        if persist and cached and not restored:
+            _store_thumbnail(cached, pixels)
+    return pixels
 
 
 def warm_materials(obj):
-    for material in obj.data.materials:
-        thumbnail(_texture(material))
+    for slot in obj.material_slots:
+        if (node := _texture_node(slot.material)) is not None:
+            thumbnail(node.image, persist=True)
 
 
-def surface_shading(mesh, matrix, slots):
-    indices = np.empty((len(mesh.loop_triangles), 3), np.int32)
-    mesh.loop_triangles.foreach_get("loops", indices.ravel())
+def surface_shading(mesh, matrix, slots, materials, indices, triangles):
     normals = np.empty((len(mesh.corner_normals), 3), np.float32)
     mesh.corner_normals.foreach_get("vector", normals.ravel())
     normals = normals @ np.linalg.pinv(matrix[:3, :3])
     normals /= np.maximum(1e-9, np.linalg.norm(normals, axis=1, keepdims=True))
-    images = [_texture(m) for m in mesh.materials]
-    uv = np.zeros((len(mesh.loops), 2), np.float32)
-    if mesh.uv_layers.active and any(i is not None for i in images):
-        mesh.uv_layers.active.uv.foreach_get("vector", uv.ravel())
-    else:
-        images = []
+    default = next((layer for layer in mesh.uv_layers if layer.active_render), mesh.uv_layers.active)
+    uv = np.zeros((len(slots), 3, 2), np.float32)
+    coordinates = {}
     textures = []
-    for mat, im in zip(mesh.materials, images):
-        pixels = thumbnail(im)
+    for i, mat in enumerate(materials):
+        node = _texture_node(mat)
+        layer = default
+        if node is not None:
+            for link in node.inputs["Vector"].links:
+                if link.from_node.type == "UVMAP" and link.from_node.uv_map:
+                    layer = mesh.uv_layers.get(link.from_node.uv_map)
+        pixels = thumbnail(node.image) if node and layer else None
+        if pixels is not None:
+            if layer.name not in coordinates:
+                values = np.empty((len(mesh.loops), 2), np.float32)
+                layer.uv.foreach_get("vector", values.ravel())
+                coordinates[layer.name] = values
+            select = slots == i
+            uv[select] = coordinates[layer.name][indices[select]]
         if pixels is not None and mat.get("excad_albedo_multiplier"):
             pixels = pixels.copy()
             pixels[:, :, :3] *= np.array(mat["excad_albedo_multiplier"])
@@ -92,17 +191,18 @@ def surface_shading(mesh, matrix, slots):
     lip = None
     attribute = mesh.color_attributes.get("EXCAD Lips")
     if attribute and attribute.domain == "POINT":
-        tints = np.zeros((max(1, len(mesh.materials)), 3), np.float32)
-        for i, material in enumerate(mesh.materials):
+        tints = np.zeros((max(1, len(materials)), 3), np.float32)
+        enabled = np.zeros(len(tints), np.bool_)
+        for i, material in enumerate(materials):
             node = material.node_tree.nodes.get("Lip tint") if material and material.use_nodes else None
             if node:
+                enabled[i] = True
                 tints[i] = node.inputs[2].default_value[:3]
         colors = np.empty((len(attribute.data), 4), np.float32)
         attribute.data.foreach_get("color", colors.ravel())
-        vertices = np.empty_like(indices)
-        mesh.loop_triangles.foreach_get("vertices", vertices.ravel())
-        lip = colors[vertices, 0], tints[np.clip(slots, 0, len(tints) - 1)]
-    return normals[indices], uv[indices], slots, textures, lip
+        material_ids = np.clip(slots, 0, len(tints) - 1)
+        lip = colors[triangles, 0] * enabled[material_ids, None], tints[material_ids]
+    return normals[indices], uv, slots, textures, lip
 
 
 class Shading:

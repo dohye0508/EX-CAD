@@ -1174,6 +1174,7 @@ def reload_addon(server):
         "wardrobe",
         "oneshot_generators",
         "city_generator",
+        "image_colors",
         "inspect_shading",
         "scene_mesh",
         "inspection",
