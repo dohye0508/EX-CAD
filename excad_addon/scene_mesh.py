@@ -160,7 +160,8 @@ def surfaces(target="ALL", shading=False):
     graph = bpy.context.evaluated_depsgraph_get()
     result = []
     for obj in objects:
-        if obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"} and obj.visible_get() and obj not in custom_shapes:
+        if (obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}
+                and obj.visible_get() and obj not in custom_shapes and not obj.get("excad_view_cage")):
             surface = read_surface(obj, graph, shading)
             if surface:
                 result.append(surface)

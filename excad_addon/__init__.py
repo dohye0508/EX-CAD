@@ -133,6 +133,7 @@ class EXCADSceneProps(PropertyGroup):
     poly_dir: StringProperty(name="Views Folder", subtype='DIR_PATH', default="")
     poly_resolution: IntProperty(name="Voxel Res", default=56, min=16, max=112)
     poly_project_color: BoolProperty(name="Project 360° Colors", default=True)
+    poly_write_depth: BoolProperty(name="Capture Depth Maps", default=False)
 
     oneshot_pose: EnumProperty(
         name="Pose",
@@ -557,9 +558,14 @@ class EXCAD_OT_poly_render_views(Operator):
         if not out_dir:
             self.report({'ERROR'}, "Select a Views Folder first")
             return {'CANCELLED'}
-        rendered, _ = polyhedron_engine.render_polyhedron_views(
-            poly_type=p.poly_type, output_dir=out_dir, size=p.poly_size, center=(0.0, 0.0, p.poly_size * 0.45)
-        )
+        try:
+            rendered, _ = polyhedron_engine.render_polyhedron_views(
+                poly_type=p.poly_type, output_dir=out_dir, size=p.poly_size, center=(0.0, 0.0, p.poly_size * 0.45),
+                write_depth=p.poly_write_depth,
+            )
+        except Exception as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
         self.report({'INFO'}, f"Rendered {len(rendered)} views to {out_dir}")
         return {'FINISHED'}
 
@@ -992,6 +998,7 @@ class VIEW3D_PT_excad_polyhedron(Panel):
         row.prop(p, "poly_resolution")
         col.prop(p, "poly_dir", text="Folder")
         col.prop(p, "poly_project_color")
+        col.prop(p, "poly_write_depth")
         col.separator()
         row = col.row(align=True)
         row.operator("excad.poly_create_rig", text="1. Camera Rig", icon='OUTLINER_OB_CAMERA')
@@ -1168,6 +1175,7 @@ def reload_addon(server):
         "asset_fetcher",
         "view_fusion",
         "polyhedron_engine",
+        "view_capture",
         "image_sketch_engine",
         "character_stylizer",
         "face_fit",

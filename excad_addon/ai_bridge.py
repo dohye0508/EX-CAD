@@ -42,7 +42,7 @@ COMPACT_SCHEMA = (
     "extrude/revolve/loft/sweep/fillet/chamfer/shell/pattern/mirror3d; "
     "feature_tree{name,recipe}, save_feature_tree/rebuild_feature_tree. render_inspect{target?,views?}. "
     "Portrait: fit_face_from_image{object,image_path}, character_stylize{object,hair?,clothes?,skin?,expression?,hands?}, "
-    "install_asset_pack/equip_asset. SDF: sdf_generate{tree,resolution?}; poly_reconstruct/poly_bake; "
+    "install_asset_pack/equip_asset. SDF: sdf_generate{tree,resolution?}; poly_render/poly_reconstruct/poly_bake; "
     "generate_3d{prompt?,image_path?,provider}. Layout: place_relative/look_at/scatter_on_surface/"
     "check_intersections/resolve_overlaps; set_material/light_studio; checkpoint/rollback{name}, undo, reload_addon."
 )
@@ -56,7 +56,7 @@ _POLY_MAP = {
 
 
 READ_ONLY = {"ping", "schema", "list", "scene_digest", "render_inspect", "check_intersections",
-             "human_list_targets", "asset_search", "asset_list_cached", "install_asset_pack", "save_feature_tree"}
+             "human_list_targets", "asset_search", "asset_list_cached", "install_asset_pack", "save_feature_tree", "poly_render"}
 LAYOUT = {fn.__name__: fn for fn in (scene_layout.place_relative, scene_layout.look_at,
           scene_layout.scatter_on_surface, scene_layout.check_intersections, scene_layout.resolve_overlaps,
           appearance.set_material, appearance.light_studio)}
@@ -723,6 +723,13 @@ class AiBridgeServer:
             )
             return {"ok": True, "cameras": len(cams), "manifest": manifest, "views": faces}
 
+        if cmd == "poly_render":
+            images, manifest = polyhedron_engine.render_polyhedron_views(
+                data.get("poly_type", "DODECAHEDRON_12"), data["output_dir"], size=data.get("size", 2.0),
+                center=data.get("center", [0, 0, 0.9]), img_res=data.get("img_res", 256),
+                write_depth=data.get("write_depth", False),
+            )
+            return {"ok": True, "views": len(images), "manifest": manifest}
         if cmd == "sdf_generate":
             from .sdf_engine import generate_sdf
             obj = generate_sdf(**{k:v for k,v in data.items() if k != "cmd"})

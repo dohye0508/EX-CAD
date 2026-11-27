@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 EX-CAD Authors
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-import json
 import math
 import os
 
@@ -85,14 +84,72 @@ def get_polyhedron_faces(poly_type: str = 'DODECAHEDRON_12') -> list[dict]:
     return faces
 
 
-def _get_or_create_collection(name: str):
-    col = bpy.data.collections.get(name)
-    if col is None:
-        col = bpy.data.collections.new(name)
-        bpy.context.scene.collection.children.link(col)
-    for obj in list(col.objects):
-        bpy.data.objects.remove(obj, do_unlink=True)
-    return col
+def _configure_camera(data, size):
+    data.type = 'ORTHO'
+    data.ortho_scale = size
+    data.clip_start = min(0.01, size * 0.01)
+    data.clip_end = max(0.1, size * 10)
+    return data
+
+
+def _view_matrix(face, center, size):
+    right, up, normal = (Vector(face[k]) for k in ("right", "up", "normal"))
+    matrix = Matrix((right, up, normal)).transposed().to_4x4()
+    matrix.translation = Vector(center) + normal * (size * 1.15)
+    return matrix
+
+
+def _rig_index(obj):
+    if obj.type != 'CAMERA':
+        return None
+    if "excad_view_index" in obj:
+        return obj["excad_view_index"]
+    # Recognize the untagged orthographic cameras made by earlier releases.
+    name = obj.name.partition(".")[0]
+    if (name.startswith("EXCAD_Cam_") and name[10:].isdecimal() and obj.data.type == 'ORTHO'
+            and obj.data.name.partition(".")[0] == name):
+        return int(name[10:])
+    return None
+
+
+def _is_cage(obj):
+    return obj.type == 'MESH' and (obj.get("excad_view_cage") or (
+        obj.display_type == 'WIRE' and obj.name.partition(".")[0] == "EXCAD_Poly_Cage"
+        and obj.data.name.partition(".")[0] == "EXCAD_Poly_Cage"
+    ))
+
+
+def _validate_frame(size, center):
+    if not math.isfinite(size) or size <= 0 or np.shape(center) != (3,) or not np.isfinite(center).all():
+        raise ValueError("Provide a finite projection center and positive size")
+
+
+def _rig_collection(scene):
+    collection = next((c for c in scene.collection.children if c.get("excad_poly_rig")), None)
+    if collection is None:
+        collection = scene.collection.children.get("EXCAD_Polyhedron_Rig")
+    if collection is None:
+        collection = bpy.data.collections.new("EXCAD_Polyhedron_Rig")
+        scene.collection.children.link(collection)
+    elif any(collection in other.collection.children_recursive for other in bpy.data.scenes if other != scene):
+        # A linked scene can share the entire collection. Isolate just its generated
+        # cameras and cage while preserving objects the user added to the rig.
+        local = collection.copy()
+        for obj in collection.objects:
+            if _rig_index(obj) is not None or _is_cage(obj):
+                copy = obj.copy()
+                local.objects.unlink(obj)
+                local.objects.link(copy)
+                if scene.camera == obj:
+                    scene.camera = copy
+                for marker in scene.timeline_markers:
+                    if marker.camera == obj:
+                        marker.camera = copy
+        scene.collection.children.link(local)
+        scene.collection.children.unlink(collection)
+        collection = local
+    collection["excad_poly_rig"] = True
+    return collection
 
 
 def create_polyhedron_rig(
@@ -101,102 +158,67 @@ def create_polyhedron_rig(
     center: tuple[float, float, float] = (0.0, 0.0, 0.9),
     output_dir: str = "",
 ):
+    _validate_frame(size, center)
     faces = get_polyhedron_faces(poly_type)
-    col = _get_or_create_collection("EXCAD_Polyhedron_Rig")
-    cx, cy, cz = center
-    cam_dist = float(size) * 1.15
-
-    # Wireframe bounding cage
+    collection = _rig_collection(bpy.context.scene)
+    cage = next((o for o in collection.objects if _is_cage(o)), None)
+    if cage is None:
+        mesh = bpy.data.meshes.new("EXCAD_Poly_Cage")
+        cage = bpy.data.objects.new("EXCAD_Poly_Cage", mesh)
+        collection.objects.link(cage)
+    elif cage.data.users > 1:
+        cage.data = cage.data.copy()
+    cage["excad_view_cage"] = True
+    cage.location = center
+    cage.display_type = 'WIRE'
+    cage.hide_render = True
     bm = bmesh.new()
-    if poly_type == 'CUBE_6':
-        bmesh.ops.create_cube(bm, size=float(size))
-    else:
-        subdiv = 1 if poly_type == 'OCTAHEDRON_8' else 2
-        bmesh.ops.create_icosphere(bm, subdivisions=subdiv, radius=float(size) * 0.55)
-    cage_mesh = bpy.data.meshes.new("EXCAD_Poly_Cage")
-    bm.to_mesh(cage_mesh)
-    bm.free()
-    cage_obj = bpy.data.objects.new("EXCAD_Poly_Cage", cage_mesh)
-    cage_obj.location = center
-    cage_obj.display_type = 'WIRE'
-    col.objects.link(cage_obj)
-
-    cam_objs = []
-    for f in faces:
-        n = f["normal"]
-        r = f["right"]
-        u = f["up"]
-        cam_data = bpy.data.cameras.new(f"EXCAD_Cam_{f['index']:02d}")
-        cam_data.type = 'ORTHO'
-        cam_data.ortho_scale = float(size)
-        cam_data.clip_start = 0.01
-        cam_data.clip_end = float(size) * 10.0
-
-        cam_obj = bpy.data.objects.new(f"EXCAD_Cam_{f['index']:02d}", cam_data)
-        mat = Matrix((
-            (r[0], u[0], n[0], cx + n[0] * cam_dist),
-            (r[1], u[1], n[1], cy + n[1] * cam_dist),
-            (r[2], u[2], n[2], cz + n[2] * cam_dist),
-            (0.0, 0.0, 0.0, 1.0),
-        ))
-        cam_obj.matrix_world = mat
-        col.objects.link(cam_obj)
-        cam_objs.append(cam_obj)
-
-    manifest_path = ""
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        manifest_path = os.path.join(output_dir, "views_manifest.json")
-        with open(manifest_path, "w", encoding="utf-8") as fp:
-            json.dump({
-                "poly_type": poly_type,
-                "size": float(size),
-                "center": list(center),
-                "views": faces,
-            }, fp, indent=2)
-
-    return faces, cam_objs, manifest_path
-
-
-def render_polyhedron_views(
-    poly_type: str,
-    output_dir: str,
-    size: float = 2.0,
-    center: tuple[float, float, float] = (0.0, 0.0, 0.9),
-    img_res: int = 256,
-):
-    faces, cam_objs, manifest_path = create_polyhedron_rig(poly_type, size, center, output_dir)
-    scene = bpy.context.scene
-    prev_cam = scene.camera
-    prev_res_x = scene.render.resolution_x
-    prev_res_y = scene.render.resolution_y
-    prev_pct = scene.render.resolution_percentage
-    prev_trans = scene.render.film_transparent
-    prev_filepath = scene.render.filepath
-
     try:
-        scene.render.resolution_x = int(img_res)
-        scene.render.resolution_y = int(img_res)
-        scene.render.resolution_percentage = 100
-        scene.render.film_transparent = True
-        scene.render.image_settings.file_format = 'PNG'
-        scene.render.image_settings.color_mode = 'RGBA'
-
-        rendered = []
-        for f, cam_obj in zip(faces, cam_objs):
-            out_path = os.path.join(output_dir, f["filename"])
-            scene.camera = cam_obj
-            scene.render.filepath = out_path
-            bpy.ops.render.render(write_still=True)
-            rendered.append(out_path)
-        return rendered, manifest_path
+        if poly_type == 'CUBE_6':
+            bmesh.ops.create_cube(bm, size=size)
+        else:
+            dual = {"OCTAHEDRON_8": "CUBE_6", "DODECAHEDRON_12": "ICOSAHEDRON_20", "ICOSAHEDRON_20": "DODECAHEDRON_12"}
+            vertices = [bm.verts.new(Vector(n) * (size * 0.55)) for n in _raw_face_normals(dual[poly_type])]
+            bmesh.ops.convex_hull(bm, input=vertices)
+            bm.normal_update()
+            bmesh.ops.dissolve_limit(bm, angle_limit=0.005, verts=bm.verts[:], edges=bm.edges[:])
+        bm.to_mesh(cage.data)
     finally:
-        scene.camera = prev_cam
-        scene.render.resolution_x = prev_res_x
-        scene.render.resolution_y = prev_res_y
-        scene.render.resolution_percentage = prev_pct
-        scene.render.film_transparent = prev_trans
-        scene.render.filepath = prev_filepath
+        bm.free()
+
+    cameras = {i: obj for obj in collection.objects if (i := _rig_index(obj)) is not None}
+    result = []
+    for face in faces:
+        index = face["index"]
+        camera = cameras.pop(index, None)
+        if camera is None:
+            name = f"EXCAD_Cam_{index:02d}"
+            camera = bpy.data.objects.new(name, bpy.data.cameras.new(name))
+            collection.objects.link(camera)
+        elif camera.data.users > 1:
+            camera.data = camera.data.copy()
+        _configure_camera(camera.data, size)
+        camera["excad_view_index"] = index
+        camera.matrix_world = _view_matrix(face, center, size)
+        result.append(camera)
+    for unused in cameras.values():
+        # Preserve a user's active camera, external links and animation references.
+        if unused.users == 1:
+            data = unused.data
+            bpy.data.objects.remove(unused, do_unlink=True)
+            if data.users == 0:
+                bpy.data.cameras.remove(data)
+    manifest = ""
+    if output_dir:
+        from .view_capture import write_manifest
+        manifest = str(write_manifest(bpy.path.abspath(output_dir), poly_type, size, center, faces))
+    return faces, result, manifest
+
+
+def render_polyhedron_views(poly_type, output_dir, size=2.0, center=(0.0, 0.0, 0.9), img_res=256, write_depth=False):
+    from .view_capture import capture
+
+    return capture(poly_type, output_dir, size, center, img_res, write_depth)
 
 
 def _load_rgba_and_mask(image_path: str, threshold: float = 0.15):
