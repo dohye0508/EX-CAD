@@ -8,7 +8,8 @@ import bmesh
 import bpy
 from mathutils import Matrix, Quaternion, Vector, geometry
 
-from .sketch_profiles import offset_loop, signed_area
+from .loft_sections import ordered_sections
+from .sketch_profiles import contains, offset_loop, signed_area
 
 
 DIRECTIONS = {
@@ -87,15 +88,6 @@ def selected_face(obj, side, placement=None):
     return [list(row) for row in frame]
 
 
-def _inside(p, loop):
-    inside = False
-    for i, a in enumerate(loop):
-        b = loop[i - 1]
-        if (a.y > p.y) != (b.y > p.y) and p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x:
-            inside = not inside
-    return inside
-
-
 def caps(loops):
     if len(loops) == 1:
         return [tuple(range(len(loops[0])))]
@@ -109,7 +101,7 @@ def caps(loops):
     triangles = []
     for face in faces:
         center = sum((vertices[i] for i in face), Vector((0, 0))) / len(face)
-        if sum(_inside(center, loop) for loop in loops) % 2:
+        if sum(contains(center, loop) for loop in loops) % 2:
             if any(len(original[i]) != 1 for i in face):
                 raise ValueError("Sketch boundaries touch or intersect")
             triangles.append(tuple(original[i][0] for i in face))
@@ -151,7 +143,7 @@ def new_mesh(objects, verts, faces, orient=True):
     return obj
 
 
-def skin_sections(objects, profiles, rings, closed=False):
+def skin_sections(objects, profiles, rings, closed=False, end_profiles=None):
     n = sum(map(len, profiles))
     faces = []
     for j in range(len(rings) if closed else len(rings) - 1):
@@ -163,9 +155,10 @@ def skin_sections(objects, profiles, rings, closed=False):
                 faces.append((j * n + a, j * n + b, next_j * n + b, next_j * n + a))
             offset += len(loop)
     if not closed:
-        for face in caps(profiles):
-            faces.append(tuple(reversed(face)))
-            faces.append(tuple((len(rings) - 1) * n + i for i in face))
+        start_cap = caps(profiles)
+        faces.extend(tuple(reversed(face)) for face in start_cap)
+        end_cap = caps(end_profiles) if end_profiles is not None else start_cap
+        faces.extend(tuple((len(rings) - 1) * n + i for i in face) for face in end_cap)
     return new_mesh(objects, [v for ring in rings for v in ring], faces)
 
 
@@ -183,16 +176,17 @@ def extrude(objects, doc, depth=1, symmetric=False, draft_angle=0, start_overlap
         raise ValueError("Extrusion needs a nonzero depth and a draft below 89 degrees")
     loops = profiles(doc)
     rings = []
+    sections = []
     start = -math.copysign(start_overlap, depth)
     for z in (-depth / 2, depth / 2) if symmetric else (start, depth):
-        ring = []
+        section = []
         for i, loop in enumerate(loops):
-            is_hole = sum(_inside(loop[0], other) for j, other in enumerate(loops) if j != i) % 2
+            is_hole = sum(contains(loop[0], other) for j, other in enumerate(loops) if j != i) % 2
             inset = z * math.tan(math.radians(draft_angle)) * (1 if is_hole else -1)
-            for u, v in offset_loop(loop, inset) if inset else loop:
-                ring.append(doc.plane_to_world(u, v, z))
-        rings.append(ring)
-    return skin_sections(objects, loops, rings)
+            section.append(offset_loop(loop, inset) if inset else loop)
+        sections.append(section)
+        rings.append([doc.plane_to_world(u, v, z) for loop in section for u, v in loop])
+    return skin_sections(objects, sections[0], rings, end_profiles=sections[-1] if draft_angle else None)
 
 
 def revolve(objects, doc, axis=None, angle_deg=360, segments=64, origin=None):
@@ -232,15 +226,22 @@ def loft(objects, docs, segments=64, interpolation="SMOOTH", steps=4):
     sections = [profiles(doc, segments) for doc in docs]
     if len(sections) < 2 or any(len(loops) != len(sections[0]) for loops in sections):
         raise ValueError("Loft needs two or more sections with matching boundary counts")
-    for loops in sections:
-        loops.sort(key=lambda loop: -abs(signed_area(loop)))
+    sections = ordered_sections(docs, sections)
+    normals = []
+    for doc in docs:
+        origin = Vector(doc.plane_to_world(0, 0, 0))
+        u, v = (Vector(doc.plane_to_world(*p, 0)) - origin for p in ((1, 0), (0, 1)))
+        normals.append(u.cross(v).normalized())
+    flipped = [False]
+    for a, b in zip(normals, normals[1:]):
+        flipped.append(flipped[-1] ^ (a.dot(b) < 0))
     rings = [[] for doc in docs]
-    base = []
+    base, end = [], []
     for boundary in zip(*sections):
         n = max(len(loop) for loop in boundary)
         previous = None
         for i, (doc, loop) in enumerate(zip(docs, boundary)):
-            if signed_area(loop) < 0:
+            if (signed_area(loop) < 0) != flipped[i]:
                 loop = list(reversed(loop))
             pts = resample(loop, n) if len(loop) != n else loop
             world = [Vector(doc.plane_to_world(*p, 0)) for p in pts]
@@ -249,8 +250,11 @@ def loft(objects, docs, segments=64, interpolation="SMOOTH", steps=4):
                     range(n), key=lambda j: sum((a - world[(k + j) % n]).length_squared for k, a in enumerate(previous))
                 )
                 world = world[shift:] + world[:shift]
+                pts = pts[shift:] + pts[:shift]
             else:
                 base.append(pts)
+            if i == len(docs) - 1:
+                end.append(pts)
             rings[i].extend(world)
             previous = world
     if interpolation == "SMOOTH" and len(rings) > 2 and steps > 1:
@@ -268,7 +272,7 @@ def loft(objects, docs, segments=64, interpolation="SMOOTH", steps=4):
                     ]
                 )
         rings = smooth + [rings[-1]]
-    return skin_sections(objects, base, rings)
+    return skin_sections(objects, base, rings, end_profiles=end)
 
 
 def path_points(path):

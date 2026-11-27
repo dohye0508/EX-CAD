@@ -16,6 +16,15 @@ def signed_area(loop):
     return sum(cross(a, loop[(i + 1) % len(loop)]) for i, a in enumerate(loop)) / 2
 
 
+def contains(p, loop):
+    inside = False
+    for i, a in enumerate(loop):
+        b = loop[i - 1]
+        if (a.y > p.y) != (b.y > p.y) and p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x:
+            inside = not inside
+    return inside
+
+
 def circle_points(center, radius, start, span, steps, endpoint):
     return [
         center + radius * Vector((math.cos(start + span * i / steps), math.sin(start + span * i / steps)))

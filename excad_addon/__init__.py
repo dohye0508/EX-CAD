@@ -1168,6 +1168,7 @@ def reload_addon(server):
         "protocol",
         "schema",
         "sketch_profiles",
+        "loft_sections",
         "sketch_engine",
         "feature_geometry",
         "feature_tree",

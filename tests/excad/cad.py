@@ -199,6 +199,37 @@ sections = {
 tree("Smooth transitions", sections, [{"type": "LOFT", "sketch_ids": list(sections), "steps": 5}])
 assert len({round(v.co.z, 4) for v in bpy.data.objects["Smooth transitions"].data.vertices}) == 11
 assert volume("Smooth transitions") > 0.1
+# The two bores trade diameters. The upper section is drawn in reverse order
+# on a downward-facing plane, as when selecting the opposite face of a fixture.
+def drilled(radii):
+    return [
+        {"type": "RECT", "width": 3, "height": 1.6},
+        *[{"type": "CIRCLE", "center": [x, 0], "radius": r} for x, r in zip((-0.78, 0.78), radii)],
+    ]
+
+
+lower_radii, upper_radii = (0.20, 0.36), (0.35, 0.17)
+downward = Matrix.Translation((0, 0, 1)) @ Matrix.Rotation(math.pi, 4, "X")
+drilled_sections = {
+    "base": {"shapes": drilled(lower_radii)},
+    "cap": {"frame": [row[:] for row in downward], "shapes": list(reversed(drilled(upper_radii)))},
+}
+tree("Tapered bores", drilled_sections, [{"type": "LOFT", "sketch_ids": ["base", "cap"]}])
+part = bpy.data.objects["Tapered bores"]
+assert [part.ray_cast((x, 0, -0.2), (0, 0, 1))[0] for x in (-0.78, 0, 0.78)] == [False, True, False]
+expected = 4.8 - sum(math.pi * (a * a + a * b + b * b) / 3 for a, b in zip(lower_radii, upper_radii))
+assert math.isclose(volume(part.name), expected, rel_tol=0.001)
+for x, a, b in zip((-0.78, 0.78), lower_radii, upper_radii):
+    hit, point, _, _ = part.ray_cast((x, 0, 0.5), (0, 1, 0))
+    assert hit and abs(point.y - (a + b) / 2) < 0.001, point
+disconnected = drilled(upper_radii)
+disconnected[-1]["center"] = [2.5, 0]
+rejected = bridge._dispatch_dict({
+    "cmd": "feature_tree", "name": part.name,
+    "recipe": {"sketches": {"a": drilled_sections["base"], "b": {"offset": 1, "shapes": disconnected}},
+               "features": [{"type": "LOFT", "sketch_ids": ["a", "b"]}]},
+})
+assert not rejected["ok"] and "Loft sections" in rejected["error"] and math.isclose(volume(part.name), expected, rel_tol=0.001)
 sketch("profile", plane="XZ")
 run("sketch_add_rect", u0=0, v0=0, width=0.7, height=0.35)
 run("revolve", name="Dial", axis="Z", angle_deg=270, segments=40)
