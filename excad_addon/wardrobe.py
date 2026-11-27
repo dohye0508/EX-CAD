@@ -536,6 +536,9 @@ def garment_clearance(human, garment):
         mod = human.modifiers.new(group.name, "MASK")
         mod.vertex_group = group.name
         mod.invert_vertex_group = True
+        # Subdivision interpolates the binary coverage across a hem. Removing
+        # every nonzero weight cuts a row of visible skin outside a V-neck.
+        mod.threshold = 0.5
         garment["excad_coverage_group"] = group.name
 
 

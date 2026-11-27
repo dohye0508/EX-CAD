@@ -143,6 +143,42 @@ def check_exposed_skin(person, shirt):
         ), "Clothing covered the face or fingers"
 
 
+def check_neckline(person, shirt):
+    """Compare the visible collar opening with the same skin before the shirt mask."""
+    graph = bpy.context.evaluated_depsgraph_get()
+    skin, fabric = read_surface(person, graph), read_surface(shirt, graph)
+    mask = next(m for m in person.modifiers if m.type == "MASK" and m.vertex_group == shirt["excad_coverage_group"])
+    mask.show_viewport = False
+    try:
+        bpy.context.view_layer.update()
+        full = read_surface(person, graph)
+    finally:
+        mask.show_viewport = True
+        bpy.context.view_layer.update()
+    with rest_mesh(person) as mesh:
+        neck = person.matrix_world @ _vgroup_center(person, mesh, ("joint-neck",))
+    height = float(full.bounds[1, 2] - full.bounds[0, 2])
+    for angle in (-0.32, 0.32):
+        eye = Vector((angle, -1, 0.23)).normalized()
+        right = eye.cross((0, 0, 1)).normalized()
+        up = right.cross(eye).normalized()
+        exposed = missing = 0
+        for x in np.linspace(-0.074, 0.074, 86):
+            for z in np.linspace(-0.094, 0.025, 72):
+                start = neck + height * (eye + right * x + up * z)
+                depth = full.bvh.ray_cast(start, -eye)[3]
+                if depth is None:
+                    continue
+                cloth = fabric.bvh.ray_cast(start, -eye)[3]
+                if cloth is not None and cloth <= depth + 1e-4:
+                    continue
+                exposed += 1
+                visible = skin.bvh.ray_cast(start, -eye)[3]
+                closest = min(v for v in (visible, cloth, height * 3) if v is not None)
+                missing += closest > depth + 0.001
+        assert exposed > 200 and missing <= 1, (angle, exposed, missing)
+
+
 with tempfile.TemporaryDirectory() as tmp:
     image_dir = Path(os.getenv("EXCAD_TEST_VARIANTS", tmp))
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +220,8 @@ with tempfile.TemporaryDirectory() as tmp:
         bones = obj.find_armature().pose.bones
         parts = {o.get("excad_slot"): o for o in bpy.context.scene.objects if o.get("excad_human") == obj}
         check_exposed_skin(obj, parts["top"])
+        if "VNECK_SWEATER" in clothes and "JACKET" not in clothes:
+            check_neckline(obj, parts["top"])
         if "JACKET" in clothes:
             check_open_lapels(parts["top"], parts["outerwear"])
 
