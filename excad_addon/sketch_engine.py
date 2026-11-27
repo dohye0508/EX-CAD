@@ -109,7 +109,7 @@ class SketchDocument:
         params = {}
         if kind == "ARC" and "points" in args:
             a, b, c = args["points"]
-            sketch_profiles.circumcenter(Vector(a), Vector(b), Vector(c))
+            sketch_profiles.circumcenter_xy(a, b, c)
             p0, params["through"], p1 = point(a), point(b), point(c)
         elif kind in {"ARC", "REGULAR_POLYGON"}:
             radius = float(args["radius"])
@@ -258,8 +258,7 @@ class SketchDocument:
             e = self.entities[index]
             center = point(e.p0)
             if "through" in e.params:
-                cc = np.array(sketch_profiles.circumcenter(Vector(center), Vector(point(e.params["through"])),
-                                                          Vector(point(e.p1))))
+                cc = np.array(sketch_profiles.circumcenter_xy(center, point(e.params["through"]), point(e.p1)))
                 return cc, np.linalg.norm(center - cc)
             return center, state[2*n_pts + index]
 

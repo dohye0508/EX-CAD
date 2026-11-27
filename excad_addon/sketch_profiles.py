@@ -32,17 +32,19 @@ def circle_points(center, radius, start, span, steps, endpoint):
     ]
 
 
-def circumcenter(a, b, c):
-    u, v = b - a, c - a
-    det = 2 * cross(u, v)
-    if abs(det) <= 1e-10 * max(u.length_squared, v.length_squared, 1e-12):
+def circumcenter_xy(a, b, c):
+    """Keep sketch precision while solving, even far from the sketch origin."""
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    vx, vy = c[0] - a[0], c[1] - a[1]
+    uu, vv = ux * ux + uy * uy, vx * vx + vy * vy
+    det = 2 * (ux * vy - uy * vx)
+    if abs(det) <= 1e-10 * max(uu, vv, 1e-12):
         raise ValueError("A three-point arc needs noncollinear points")
-    return a + Vector(
-        (
-            (v.y * u.length_squared - u.y * v.length_squared) / det,
-            (u.x * v.length_squared - v.x * u.length_squared) / det,
-        )
-    )
+    return a[0] + (vy * uu - uy * vv) / det, a[1] + (ux * vv - vx * uu) / det
+
+
+def circumcenter(a, b, c):
+    return Vector(circumcenter_xy(a, b, c))
 
 
 def offset_loop(loop, distance):

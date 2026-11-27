@@ -96,6 +96,29 @@ for kind in ("MIDPOINT", "SYMMETRIC", "ANGLE", "TANGENT", "CONCENTRIC"):
     solved, _, residual = d.solve()
     assert solved and residual < 1e-6, (kind, residual)
 
+# A translated three-point arc must retain enough precision for the numerical
+# Jacobian. Check control-point radii and the tangent line in sketch units.
+cx, cy = 130.31857, -187.12389
+d = SketchDocument()
+anchor = d.add_circle(cx, cy, 0.6)
+d.points[0].fixed = True
+arc = d.add_shape("ARC", points=[(cx + 1.13, cy), (cx + 0.1, cy + 0.96), (cx - 0.89, cy)])
+d.add_constraint("CONCENTRIC", anchor, arc)
+assert d.solve()[0]
+radii = [math.hypot(p.u - cx, p.v - cy) for p in d.points[1:]]
+assert max(radii) - min(radii) < 2e-7, radii
+
+d = SketchDocument()
+radius = 0.77
+arc = d.add_shape("ARC", points=[(cx + radius, cy), (cx, cy + radius), (cx - radius, cy)])
+for p in d.points:
+    p.fixed = True
+line = d.add_line(cx - 1, cy + 0.98, cx + 1, cy + 0.98)
+d.add_constraint("HORIZONTAL", d.entities[line].p0, d.entities[line].p1)
+d.add_constraint("TANGENT", line, arc)
+assert d.solve()[0]
+assert all(abs(p.v - cy - radius) < 2e-7 for p in d.points[-2:])
+
 sketch()
 run("sketch_add_circle", radius=0.5)
 run("sketch_constraint", ctype="FIXED", a=0)
