@@ -8,6 +8,7 @@ from pathlib import Path
 import addon_utils
 import bpy
 import numpy as np
+from mathutils import Vector
 
 addon_utils.enable("bl_ext.blender_org.mpfb", default_set=True)
 from excad_addon.ai_bridge import AiBridgeServer
@@ -183,6 +184,28 @@ with rest_mesh(human) as mesh:
 for eye in eyes:
     assert np.allclose(eye["excad_eye_center"][:], centers[eye["excad_eye_side"]], atol=1e-6)
 assert np.max(np.abs(old_centers - np.array([o["excad_eye_center"][:] for o in eyes]))) > 1e-4
+
+# The body, CC0 assets and tailored clothes do not all have the same direct
+# parent. A turn must preserve the posed geometry of the complete person.
+rig = human.find_armature()
+rig_before = rig.matrix_world.copy()
+body_local = rig_before.inverted() @ human.matrix_world
+aim_target = bpy.data.objects.new("Look at", None)
+bpy.context.collection.objects.link(aim_target)
+aim_target.location = human.matrix_world.translation + Vector((-2.0, -1.1, 0.16))
+original = {s.obj.name: s.points[::37].copy() for s in scene_mesh.surfaces(human.name)}
+run("look_at", obj=human.name, target=aim_target.name)
+assert np.allclose(rig.matrix_world.inverted() @ human.matrix_world, body_local, atol=1e-6)
+aim = (aim_target.matrix_world.translation - human.matrix_world.translation).normalized()
+assert (human.matrix_world.to_quaternion() @ Vector((0, -1, 0))).dot(aim) > 0.9999
+turn = np.asarray(rig.matrix_world @ rig_before.inverted())
+for surface in scene_mesh.surfaces(human.name):
+    expected = original[surface.obj.name] @ turn[:3, :3].T + turn[:3, 3]
+    assert np.allclose(surface.points[::37], expected, atol=1e-5), surface.obj.name
+rig.matrix_world = rig_before
+bpy.data.objects.remove(aim_target, do_unlink=True)
+bpy.context.view_layer.update()
+
 wear(clothes=[], lashes=False)
 assert all(o.get("excad_slot") not in {"top", "bottom", "footwear", "lashes"} for o in bpy.context.scene.objects)
 assert any(o.get("excad_slot") == "hair" for o in bpy.context.scene.objects)

@@ -35,8 +35,13 @@ def _translate(obj, delta):
     bpy.context.view_layer.update()
 
 
+def _placement_root(obj):
+    return (obj.find_armature() or obj) if obj.get("excad_character") else obj
+
+
 def place_relative(obj, target=None, relation="ON_TOP_OF", gap=None):
     obj = bpy.context.scene.objects[obj]
+    root = _placement_root(obj)
     relation = relation.upper()
     gap = float(gap if gap is not None else 0 if relation == "ALIGN_FLOOR" else 0.05)
     moving = _items(obj)
@@ -46,7 +51,7 @@ def place_relative(obj, target=None, relation="ON_TOP_OF", gap=None):
         delta[2] = gap - a[0, 2]
     else:
         other = bpy.context.scene.objects[target]
-        if obj == other or other in obj.children_recursive:
+        if root == other or other in root.children_recursive:
             raise ValueError("The support must be independent of the moving object")
         support = _items(other)
         b = _bounds(support)
@@ -69,7 +74,6 @@ def place_relative(obj, target=None, relation="ON_TOP_OF", gap=None):
             low, high = (1, 0) if sign > 0 else (0, 1)
             delta[axis] = b[low, axis] + sign * gap - a[high, axis]
             delta[2] = b[0, 2] - a[0, 2]
-    root = (obj.find_armature() or obj) if obj.get("excad_character") else obj
     _translate(root, delta)
     return {"object": obj.name, "bbox": (a + delta).round(5).tolist()}
 
@@ -77,7 +81,7 @@ def place_relative(obj, target=None, relation="ON_TOP_OF", gap=None):
 def look_at(obj, target):
     source = bpy.context.scene.objects[obj]
     dest = bpy.context.scene.objects[target]
-    position, _, scale = source.matrix_world.decompose()
+    position, current, scale = source.matrix_world.decompose()
     try:
         center = Vector(bounds(dest).mean(0))
     except ValueError:
@@ -87,7 +91,15 @@ def look_at(obj, target):
         raise ValueError("Look-at target coincides with the object origin")
     track = "-Z" if source.type in {"CAMERA", "LIGHT"} else "-Y"
     rotation = direction.to_track_quat(track, "Y" if track == "-Z" else "Z")
-    source.matrix_world = Matrix.LocRotScale(position, rotation, scale)
+    root = _placement_root(source)
+    if root == source:
+        source.matrix_world = Matrix.LocRotScale(position, rotation, scale)
+    else:
+        # Clothes and hair may be siblings of the body under the armature.
+        # Turn the whole rig about the requested object's origin.
+        turn = (rotation @ current.inverted()).to_matrix().to_4x4()
+        turn.translation = position - turn.to_3x3() @ position
+        root.matrix_world = turn @ root.matrix_world
     bpy.context.view_layer.update()
     return {"object": source.name}
 
@@ -124,9 +136,7 @@ def scatter_on_surface(asset, surface_obj, count, min_dist=0.1, align_normal=Tru
     from .scatter_support import ScatterAsset
 
     scene = bpy.context.scene
-    source, surface = scene.objects[asset], scene.objects[surface_obj]
-    if source.get("excad_character"):
-        source = source.find_armature() or source
+    source, surface = _placement_root(scene.objects[asset]), scene.objects[surface_obj]
     if count < 1 or count > 10000 or not math.isfinite(min_dist) or min_dist < 0:
         raise ValueError("Choose 1..10000 instances and nonnegative spacing")
     if max_slope is not None and not 0 <= max_slope <= 180:
@@ -235,7 +245,7 @@ def _assemblies(names):
     result = []
     for name in dict.fromkeys(names):
         obj = bpy.context.scene.objects[name]
-        root = (obj.find_armature() or obj) if obj.get("excad_character") else obj
+        root = _placement_root(obj)
         parts = _items(root)
         members = {s.obj for s in parts}
         if occupied & members:
