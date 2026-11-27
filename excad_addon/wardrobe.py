@@ -454,19 +454,20 @@ def garment_clearance(human, garment):
         garment["excad_coverage_group"] = group.name
 
 
-def _clear_hair_faces(human, hair, skin, key, mixed, surfaces):
-    """Clear the collar along the skin normal, including crossings between card vertices."""
+def _clear_layer_faces(human, outer, skin, key, mixed, surfaces, neck, span):
+    """Clear inner fabric along the skin normal, including crossings between vertices."""
     from mathutils.bvhtree import BVHTree
 
     body = _body_surface(human, skin)
     to_skin = human.matrix_world.inverted()
     normal_to_world = to_skin.to_3x3().transposed()
-    to_hair = hair.matrix_world.to_3x3().inverted()
-    basis = hair.data.shape_keys.reference_key
-    points = [hair.matrix_world @ (p + v.co - b.co) for p, v, b in zip(mixed, key.data, basis.data)]
-    hair.data.calc_loop_triangles()
-    triangles = [tuple(t.vertices) for t in hair.data.loop_triangles]
-    for _ in range(5):
+    to_outer = outer.matrix_world.to_3x3().inverted()
+    basis = outer.data.shape_keys.reference_key
+    points = [outer.matrix_world @ (p + v.co - b.co) for p, v, b in zip(mixed, key.data, basis.data)]
+    outer.data.calc_loop_triangles()
+    triangles = [tuple(t.vertices) for t in outer.data.loop_triangles]
+    scale = (human.matrix_world.to_3x3() @ Vector((0, 0, span))).length
+    for _ in range(8):
         tree = BVHTree.FromPolygons(points, triangles, all_triangles=True)
         corrections = {}
         for surface in surfaces:
@@ -481,14 +482,96 @@ def _clear_hair_faces(human, hair, skin, key, mixed, surfaces):
                 if normal.dot(normal_to_world @ near[1]) < 0:
                     normal = -normal
                 for index in triangles[hi]:
-                    distance = 0.0025 - (points[index] - a).dot(normal)
+                    distance = scale * 0.008 - (points[index] - a).dot(normal)
                     if distance > 0 and (index not in corrections or distance > corrections[index][0]):
-                        corrections[index] = (distance, normal * min(0.018, distance))
+                        corrections[index] = (distance, normal * min(scale * 0.060, distance))
         if not corrections:
             break
         for index, (_, shift) in corrections.items():
             points[index] += shift
-            key.data[index].co += to_hair @ shift
+            key.data[index].co += to_outer @ shift
+    if outer.get("excad_draped_hair"):
+        # Leave articulation space over the moving shoulder. Head-weighted locks
+        # rotate at the neck while the collar follows the chest and upper arms.
+        ease = to_outer @ human.matrix_world.to_3x3() @ Vector((0, 0.010 * span, 0.040 * span))
+        for i, point in enumerate(points):
+            local = to_skin @ point
+            z = (local.z - neck.z) / span
+            lateral = abs(local.x - neck.x) / span
+            if abs(z) >= 0.45 or not 0.03 < lateral < 0.39:
+                continue
+            distances = (s.bvh.find_nearest(point, scale * 0.24)[3] for s in surfaces if s is not None)
+            nearest = min((d / scale for d in distances if d is not None), default=0.24)
+            fade = min(1.0, (lateral - 0.03) / 0.08, (0.39 - lateral) / 0.10, (0.24 - nearest) / 0.07)
+            key.data[i].co += ease * (math.exp(-((z / 0.14) ** 2)) * max(0, fade))
+
+
+def _remove_layer_mask(obj):
+    name = obj.get("excad_underlay_group")
+    if not name:
+        return
+    for mod in list(obj.modifiers):
+        if mod.type == "MASK" and mod.vertex_group == name:
+            obj.modifiers.remove(mod)
+    if group := obj.vertex_groups.get(name):
+        obj.vertex_groups.remove(group)
+    del obj["excad_underlay_group"]
+
+
+def _mask_under_jacket(jacket, shirt, span):
+    """Hide covered shirt panels, retaining the shirt at the open fronts, collar and hems."""
+    from mathutils.bvhtree import BVHTree
+    from mathutils.kdtree import KDTree
+
+    graph = bpy.context.evaluated_depsgraph_get()
+    outer = jacket.evaluated_get(graph)
+    inner = shirt.evaluated_get(graph)
+    jacket_mesh, shirt_mesh = outer.to_mesh(), inner.to_mesh()
+    try:
+        if len(shirt_mesh.vertices) != len(shirt.data.vertices):
+            return
+        points = [outer.matrix_world @ v.co for v in jacket_mesh.vertices]
+        faces = [tuple(f.vertices) for f in jacket_mesh.polygons]
+        surface = BVHTree.FromPolygons(points, faces)
+        counts = {}
+        for poly in jacket_mesh.polygons:
+            for edge in poly.edge_keys:
+                counts[edge] = counts.get(edge, 0) + 1
+        seam = jacket.vertex_groups.get("EXCAD seams")
+        hem = {
+            v.index
+            for v in jacket_mesh.vertices
+            if seam and any(g.group == seam.index and g.weight > 0.3 for g in v.groups)
+        }
+        boundary = []
+        for (a, b), count in counts.items():
+            if count == 1 or (a in hem and b in hem):
+                steps = max(1, math.ceil((points[a] - points[b]).length / (span * 0.012)))
+                boundary.extend(points[a].lerp(points[b], i / steps) for i in range(steps + 1))
+        if not boundary:
+            return
+        edges = KDTree(len(boundary))
+        for i, p in enumerate(boundary):
+            edges.insert(p, i)
+        edges.balance()
+        normals = inner.matrix_world.to_3x3().inverted().transposed()
+        hide = []
+        for vertex in shirt_mesh.vertices:
+            point = inner.matrix_world @ vertex.co
+            normal = (normals @ vertex.normal).normalized()
+            hit, direction, _, _ = surface.ray_cast(point - normal * (0.01 * span), normal, 0.24 * span)
+            if hit is not None and abs(normal.dot(direction)) > 0.25 and edges.find(hit)[2] > 0.045 * span:
+                hide.append(vertex.index)
+    finally:
+        outer.to_mesh_clear()
+        inner.to_mesh_clear()
+    if hide:
+        group = shirt.vertex_groups.new(name="EXCAD under jacket")
+        group.add(hide, 1, "REPLACE")
+        mod = shirt.modifiers.new(group.name, "MASK")
+        mod.vertex_group = group.name
+        mod.invert_vertex_group = True
+        shirt["excad_underlay_group"] = group.name
 
 
 def refit_layers(human, omit=()):
@@ -496,6 +579,8 @@ def refit_layers(human, omit=()):
     from .scene_mesh import read_surface
 
     pieces = [o for o in bpy.context.scene.objects if o.get("excad_human") == human and o not in omit]
+    for piece in pieces:
+        _remove_layer_mask(piece)
     if not any(o.get("excad_outer_fabric") or o.get("excad_draped_hair") for o in pieces):
         return
     with rest_mesh(human) as skin_mesh:
@@ -565,9 +650,15 @@ def refit_layers(human, omit=()):
                         if 0 < amount < reach * 0.24:
                             push = max(push, amount)
                 key.data[i].co += from_world @ (out * push)
-            if hair:
-                _clear_hair_faces(human, outer, skin_mesh, key, points, surfaces)
+            if hair or outer.get("excad_slot") == "outerwear":
+                _clear_layer_faces(human, outer, skin_mesh, key, points, surfaces, neck, span)
             key.value = 1
+            if outer.get("excad_slot") == "outerwear":
+                bpy.context.view_layer.update()
+                world_span = (to_world @ Vector((0, 0, span))).length
+                for shirt in obstacles:
+                    if shirt.get("excad_slot") == "top":
+                        _mask_under_jacket(outer, shirt, world_span)
 
 
 def garment(human, style):

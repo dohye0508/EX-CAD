@@ -134,12 +134,17 @@ assert run("oneshot_pose", object="Portrait", pose="HEROIC")["posed_bones"] >= 5
 posed = scene_mesh.surfaces(hair)[0].points
 assert np.max(np.linalg.norm(posed - rest, axis=1)) > 0.005
 assert wear(hands="POINT")["posed_fingers"] == 30
+current = run("scene_digest")["h"]
+assert not run_bridge({"cmd": "oneshot_pose", "object": "Portrait", "pose": "UNKNOWN"})["ok"]
+assert run("scene_digest", since_hash=current).get("unchanged")
 if os.getenv("EXCAD_TEST_VARIANTS"):
     rendered = run(
         "render_inspect", target="Portrait", size=260, path=str(Path(os.environ["EXCAD_TEST_VARIANTS"]) / "posed.png")
     )
     print("POSED", rendered["warnings"], flush=True)
     assert not rendered["warnings"], rendered["warnings"]
+assert run("oneshot_pose", object="Portrait", pose="RESET")["posed_bones"] == len(human.find_armature().pose.bones)
+assert np.allclose(scene_mesh.surfaces(hair)[0].points, rest, atol=1e-5)
 wear(iris_size=0.62)
 iris = bpy.data.materials[human.name + " Iris"]
 assert np.allclose(iris.diffuse_color[:3], [0.15, 0.075, 0.025])

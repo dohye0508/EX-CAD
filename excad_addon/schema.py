@@ -23,7 +23,7 @@ TOPICS = {
     ),
     "character": (
         "human_generate{name,preset?,rig?}; fit_face_from_image{object,image_path}; "
-        "character_stylize{object,hair?,clothes?,skin?,eyes?,iris_color?,iris_size?,lip_tint?,lashes?,teeth?,expression?,hands?}. "
+        "character_stylize{object,hair?,clothes?,remove?:[slot],skin?,eyes?,iris_color?,iris_size?,lip_tint?,lashes?,teeth?,expression?,hands?}. "
         "hair SHORT|BOB|PONYTAIL|LONG_STRAIGHT|LONG_WAVY|CURTAIN_BANGS. clothes list of TSHIRT|VNECK_SWEATER|HOODIE|JACKET|PANTS|SKIRT|SHOES. "
         "skin FAIR_IVORY|WARM_BEIGE|TAN|DEEP. expression SMILE|SERIOUS|SURPRISED|WINK. hands RELAXED|FIST|POINT|OPEN. "
         "install_asset_pack{pack:all|system|shirts|pants|skirts}; equip_asset{human,name,pack?}."

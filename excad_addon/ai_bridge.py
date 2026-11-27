@@ -578,7 +578,8 @@ class AiBridgeServer:
             }
 
         if cmd == "oneshot_pose":
-            obj = bpy.data.objects.get(data.get("object", "")) or bpy.context.active_object
+            name = data.get("object")
+            obj = bpy.context.scene.objects.get(name) if name else bpy.context.active_object
             if obj is not None and obj.type == 'MESH':
                 obj = obj.find_armature()
             n = oneshot_generators.apply_pose_preset(obj, data.get("pose", "RELAXED"))
@@ -611,7 +612,7 @@ class AiBridgeServer:
         if cmd == "character_stylize":
             obj = bpy.data.objects.get(data.get("object", "")) or bpy.context.active_object
             if ("hair" in data and data["hair"] is None) or isinstance(data.get("hair"), str) or any(k in data for k in (
-                    "clothes", "skin", "lip_tint", "eyes", "iris_color", "iris_size", "lashes", "teeth", "hands", "expression")):
+                    "clothes", "remove", "skin", "lip_tint", "eyes", "iris_color", "iris_size", "lashes", "teeth", "hands", "expression")):
                 return {"ok": True, **character_stylizer.style_character(obj, data)}
             objs = character_stylizer.stylize_portrait_character(
                 obj,
