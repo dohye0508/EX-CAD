@@ -389,7 +389,7 @@ def finish_edges(body, edges, width, segments):
             chosen = [e for e in chosen if all(abs(v.co.z - z) < 1e-5 for v in e.verts)]
         if not chosen:
             raise ValueError("No matching edges")
-        bmesh.ops.bevel(bm, geom=chosen, offset=width, segments=segments, affect="EDGES", clamp_overlap=True)
+        bmesh.ops.bevel(bm, geom=chosen, offset=width, segments=segments, profile=0.5, affect="EDGES", clamp_overlap=True)
         bm.to_mesh(body.data)
     finally:
         bm.free()

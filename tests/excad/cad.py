@@ -117,7 +117,9 @@ bpy.context.view_layer.update()
 assert not bpy.data.objects["Housing"].ray_cast((0, 0, 2), (0, 0, -1))[0], "Slot roof obstructs through-cut"
 out = Path(os.getenv("EXCAD_TEST_OUTPUT", bpy.app.tempdir))
 out.mkdir(exist_ok=True, parents=True)
-probe = run("render_inspect", target="Housing", path=str(out / "phase1-cad.png"))
+finish = run("set_material", object="Housing", preset="BRUSHED_METAL", color=[0.35, 0.48, 0.58])["material"]
+run("light_studio", target="Housing", style="PRODUCT", power=1.15)
+probe = run("render_inspect", target="Housing", size=256, path=str(out / "phase1-cad.png"))
 assert not probe["warnings"], probe
 print("CAD INSPECTION", probe)
 recipe_path = Path(bpy.app.tempdir) / "feature_tree.json"
@@ -132,6 +134,8 @@ run("rebuild_feature_tree", object="Independent housing", path=str(recipe_path))
 assert abs(volume("Independent housing") - before) < 1e-5
 run("rebuild_feature_tree", object="Housing", path=str(recipe_path), parameters={"base.depth": 0.72})
 assert volume("Housing") > before
+rebuilt = bpy.data.objects["Housing"]
+assert rebuilt.active_material == bpy.data.materials[finish], (list(rebuilt.data.materials), rebuilt.active_material_index)
 fresh = run(
     "feature_tree",
     name="Dimensioned",
@@ -140,10 +144,35 @@ fresh = run(
         "features": [{"id": "height", "type": "EXTRUDE", "sketch": "plate", "depth": 1}],
     },
 )
+dimensioned = bpy.data.objects[fresh["name"]]
+side_paint = bpy.data.materials.new("Body paint")
+cap_paint = bpy.data.materials.new("Cap paint")
+override = bpy.data.materials.new("Instance cap paint")
+dimensioned.data.materials.append(side_paint)
+dimensioned.data.materials.append(cap_paint)
+for polygon in dimensioned.data.polygons:
+    polygon.material_index = int(polygon.normal.z > 0.99)
+dimensioned.material_slots[1].link = "OBJECT"
+dimensioned.material_slots[1].material = override
+dimensioned.active_material_index = 1
+linked = dimensioned.copy()
+bpy.context.collection.objects.link(linked)
+original_data = linked.data
 run(
     "rebuild_feature_tree", object="Dimensioned", parameters={"sketches.plate.shapes.0.width": 2.0, "height.depth": 0.5}
 )
 assert abs(volume("Dimensioned") - 1.8) < 1e-5
+run("fillet", object=dimensioned.name, edges="TOP", radius=0.04)
+assert linked.data == original_data and linked.data != dimensioned.data
+assert list(dimensioned.data.materials) == [side_paint, cap_paint] and dimensioned.active_material == override
+assert all(p.material_index == 1 for p in dimensioned.data.polygons if p.normal.z > 0.999)
+assert all(p.material_index == 0 for p in dimensioned.data.polygons if p.normal.z < 0.01)
+# On a 90-degree outside edge the five-segment fillet lies on a quarter circle.
+for degrees in (18, 36, 54, 72):
+    theta = math.radians(degrees)
+    x = 1 - 0.04 + 0.04 * math.cos(theta)
+    hit, position, _, _ = dimensioned.ray_cast((x, 0, 1), (0, 0, -1))
+    assert hit and abs(position.z - (0.46 + 0.04 * math.sin(theta))) < 0.0005
 bad = bridge._dispatch_dict({"cmd": "rebuild_feature_tree", "object": "Housing", "parameters": {"base.depth": 0}})
 assert not bad["ok"] and volume("Housing") > before
 sketch()

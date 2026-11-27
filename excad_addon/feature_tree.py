@@ -10,7 +10,9 @@ import tempfile
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
 
 from . import feature_geometry as geo
 from .sketch_engine import SketchDocument
@@ -121,12 +123,40 @@ def _solid(mesh):
         bm.free()
 
 
+def _vertex_positions(mesh):
+    xyz = np.empty((len(mesh.vertices), 3), np.float32)
+    mesh.vertices.foreach_get("co", xyz.ravel())
+    return xyz
+
+
+def _carry_face_materials(source, rebuilt):
+    indices = np.empty(len(source.polygons), np.int32)
+    source.polygons.foreach_get("material_index", indices)
+    if np.all(indices == indices[0]):
+        result = np.full(len(rebuilt.polygons), indices[0], np.int32)
+    else:
+        # A dimensional edit can renumber faces. Match their positions in the
+        # two model frames so painted caps follow a change in height or width.
+        coords = _vertex_positions(source)
+        coords = (coords - coords.min(0)) / np.maximum(np.ptp(coords, axis=0), 1e-8)
+        tree = BVHTree.FromPolygons(coords.tolist(), [p.vertices[:] for p in source.polygons])
+        coords = _vertex_positions(rebuilt)
+        minimum, span = coords.min(0), np.maximum(np.ptp(coords, axis=0), 1e-8)
+        centers = np.empty((len(rebuilt.polygons), 3), np.float32)
+        rebuilt.polygons.foreach_get("center", centers.ravel())
+        nearest = (tree.find_nearest(p)[2] for p in (centers - minimum) / span)
+        result = np.fromiter((indices[i] if i is not None else 0 for i in nearest), np.int32, len(centers))
+    rebuilt.polygons.foreach_set("material_index", result)
+
+
 class FeatureTree:
     def __init__(self, name, recipe=None):
         self.name = name
         self.owner = bpy.context.scene.objects.get(name)
         if self.owner and self.owner.type != "MESH":
             raise ValueError("Feature tree owner must be a mesh")
+        if self.owner and self.owner.library and not self.owner.override_library:
+            raise ValueError("Editing a linked model requires a local object or a library override")
         if recipe is not None:
             self.recipe = copy.deepcopy(recipe)
         elif self.owner and "excad_tree" in self.owner:
@@ -261,7 +291,11 @@ class FeatureTree:
             if body is None:
                 raise ValueError("Feature tree is empty")
             raw = json.dumps(recipe, separators=(",", ":"), allow_nan=False)
-            result = body.data.copy()
+            # The construction context cleans this mesh on failure. A successful
+            # assignment to the visible object keeps it alive when the temporary body is removed.
+            result = body.data
+            # Blender booleans may allocate an empty first slot on construction meshes.
+            result.materials.clear()
             if "model_frame" in recipe:
                 result.transform(model_frame.inverted())
                 if model_frame.to_3x3().determinant() < 0:
@@ -272,10 +306,20 @@ class FeatureTree:
                 self.owner.matrix_world = model_frame
             else:
                 old = self.owner.data
+                overrides = [(s.link, s.material) for s in self.owner.material_slots]
+                active = self.owner.active_material_index
                 for material in old.materials:
                     result.materials.append(material)
+                if len(old.materials) > 1 and old.polygons:
+                    _carry_face_materials(old, result)
                 self.owner.data = result
-                if old.users == 0:
+                for slot, (link, material) in zip(self.owner.material_slots, overrides):
+                    slot.link = link
+                    if link == "OBJECT":
+                        slot.material = material
+                if overrides:
+                    self.owner.active_material_index = active
+                if old.users == 0 and not old.library:
                     bpy.data.meshes.remove(old)
             result.name = f"{self.owner.name} Solid"
             self.owner["excad_tree"] = raw
