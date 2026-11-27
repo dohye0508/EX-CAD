@@ -1171,6 +1171,7 @@ def reload_addon(server):
         "loft_sections",
         "sketch_engine",
         "feature_geometry",
+        "uv_transfer",
         "feature_tree",
         "human_engine",
         "asset_fetcher",

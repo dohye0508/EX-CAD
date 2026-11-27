@@ -107,6 +107,8 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 
 생성된 GLB는 지정한 `height`로 스케일을 맞추고 바닥에 접지한다. 여러 부품이 있으면 반환값의 `name`으로 조립체 전체를 이동할 수 있다. `rig: "PARTS"` 또는 `rig: true`는 리그가 없는 부품에 본과 웨이트를 부여한다. 사람 형태에는 `rig: "HUMANOID"`를 지정한다. 머리·몸·의복이 별도 메시인 인물에도 하나의 스켈레톤을 만들고 같은 웨이트를 의상과 장식에 전이한다. 원본 GLB에 리그가 있으면 그 리그를 사용하며 루트 애니메이션의 이동과 크기를 유지한다. `remesh: true`는 복셀 리메시를 적용한다. `timeout`의 단위는 초이며 기본값은 900이다. 원격 호출과 다운로드는 작업 스레드에서 처리하고 Blender 메인 스레드에서 장면에 가져온다.
 
+복셀 리메시를 선택하면 새 면마다 원본의 UV 섬을 찾고, 그 안에서 각 모서리의 텍스처 좌표를 보간한다. 서로 떨어진 무늬 사이를 가로지르는 픽셀을 줄이고 여러 UV 레이어와 활성 렌더 레이어를 보존한다.
+
 ## 배치 결과 확인과 복구
 
 `place_relative`는 이름으로 지지물과 이동 대상을 지정한다. `ON_TOP_OF`는 양쪽의 실제 표면을 기준으로 수직 간격을 맞춘다. `scatter_on_surface`는 면적 비례 샘플링을 사용하며 `seed`로 같은 배치를 재현할 수 있다. `resolve_overlaps`의 `fixed`에 움직이면 안 되는 물체를 넣는다. 부모 아래의 부품은 기본적으로 한 조립체로 이동한다.
@@ -130,6 +132,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 }
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/endurance.py -- 71127038
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/overlay.py
+& $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/surface_transfer.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003 81128007 81128018 81128021
 ```

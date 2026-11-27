@@ -326,9 +326,18 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
                 extent = max(max(c[i] for c in corners) - min(c[i] for c in corners) for i in range(3))
                 obj.data.remesh_voxel_size = extent / 128
                 obj.data.use_remesh_preserve_attributes = True
-                with bpy.context.temp_override(object=obj, active_object=obj):
-                    if "FINISHED" not in bpy.ops.object.voxel_remesh():
-                        raise ValueError(f"Could not remesh {obj.name}")
+                original = obj.data.copy() if obj.data.uv_layers else None
+                try:
+                    with bpy.context.temp_override(object=obj, active_object=obj):
+                        if "FINISHED" not in bpy.ops.object.voxel_remesh():
+                            raise ValueError(f"Could not remesh {obj.name}")
+                    if original:
+                        from .uv_transfer import transfer_uv
+
+                        transfer_uv(original, obj.data)
+                finally:
+                    if original:
+                        bpy.data.meshes.remove(original)
         bpy.context.view_layer.update()
         placement = _normalize(_root_objects(imported), meshes, height, name)
         if placement is not None:
