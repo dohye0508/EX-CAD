@@ -307,7 +307,9 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
     before = {key: set(getattr(bpy.data, key)) for key in groups}
     selected, active = list(bpy.context.selected_objects), bpy.context.view_layer.objects.active
     try:
-        imported = import_asset_file(str(path))
+        # GLB stores separate render vertices at UV seams. Blender can share
+        # their positions while retaining a different UV on each face corner.
+        imported = import_asset_file(str(path), merge_vertices=True)
         controls = bone_shapes(imported)
         imported = [obj for obj in imported if obj not in controls and obj.name in bpy.context.scene.objects]
         meshes = [o for o in imported if o.type == "MESH"]

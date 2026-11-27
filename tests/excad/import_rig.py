@@ -4,6 +4,7 @@
 import tempfile
 from pathlib import Path
 
+import bmesh
 import bpy
 import numpy as np
 
@@ -114,4 +115,30 @@ with tempfile.TemporaryDirectory() as tmp:
         assert abs(low.z) < 1e-5 and abs(high.z - 0.3) < 1e-5
         measured.append((low.x + high.x) / 2)
     assert np.allclose(measured, (0, 0.3, 0), atol=1e-4), measured
+    # A texture discontinuity shares one geometric edge. Removing a face
+    # creates a real opening which the GLB round-trip must keep.
+    from excad_addon.scene_mesh import read_surface
+
+    ball = ellipsoid("UV chart sphere", (2, 0, 1), (0.3, 0.3, 0.3))
+    for poly in ball.data.polygons:
+        poly.use_smooth = True
+    for opened in (False, True):
+        if opened:
+            bm = bmesh.new()
+            bm.from_mesh(ball.data)
+            face = next(f for f in bm.faces if len(f.verts) == 4)
+            bmesh.ops.delete(bm, geom=[face], context="FACES")
+            bm.to_mesh(ball.data)
+            bm.free()
+        path = Path(tmp, "uv-charts.glb")
+        export(path, [ball])
+        result = providers.import_model(path, height=0.6, name="Open chart" if opened else "Closed chart")
+        obj = bpy.data.objects[result["meshes"][0]]
+        surface = read_surface(obj, bpy.context.evaluated_depsgraph_get())
+        assert surface.boundary_edges == (4 if opened else 0) and surface.nonmanifold_edges == 0
+        layer = obj.data.uv_layers.active
+        by_vertex = {}
+        for corner in obj.data.loops:
+            by_vertex.setdefault(corner.vertex_index, []).append(layer.uv[corner.index].vector.x)
+        assert any(max(us) - min(us) > 0.95 for us in by_vertex.values())
 print("HUMANOID GLB PASS", bpy.app.version_string)

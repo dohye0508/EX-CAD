@@ -113,7 +113,7 @@ def search_assets(query: str = "", extra_dir: str = "", limit: int = 30) -> list
     return out
 
 
-def import_asset_file(filepath: str, target_basemesh=None) -> list:
+def import_asset_file(filepath: str, target_basemesh=None, *, merge_vertices=False) -> list:
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"Asset file not found: {filepath}")
 
@@ -121,7 +121,7 @@ def import_asset_file(filepath: str, target_basemesh=None) -> list:
     before = set(bpy.data.objects.keys())
 
     if ext in (".glb", ".gltf"):
-        bpy.ops.import_scene.gltf(filepath=filepath)
+        bpy.ops.import_scene.gltf(filepath=filepath, merge_vertices=merge_vertices)
     elif ext == ".obj":
         bpy.ops.wm.obj_import(filepath=filepath)
     elif ext == ".fbx":
