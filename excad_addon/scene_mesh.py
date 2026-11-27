@@ -108,65 +108,95 @@ def nearby_pairs(items, tolerance=1e-5):
                 yield (index, other) if index < other else (other, index)
 
 
-def read_surface(obj, graph, shading=False):
-    evaluated = obj.evaluated_get(graph)
-    with evaluated_mesh(evaluated) as mesh:
-        if not mesh or not mesh.polygons:
-            return None
+class MeshGeometry:
+    """Local attributes of an evaluated mesh shared by its linked copies during one query."""
+
+    def __init__(self, mesh, shaded):
         mesh.calc_loop_triangles()
-        coords = np.empty((len(mesh.vertices), 3), np.float32)
-        mesh.vertices.foreach_get("co", coords.ravel())
-        matrix = np.asarray(evaluated.matrix_world, dtype=np.float32)
-        points = coords @ matrix[:3, :3].T + matrix[:3, 3]
-        corners = np.empty((len(mesh.loop_triangles), 3), np.int32)
-        mesh.loop_triangles.foreach_get("loops", corners.ravel())
+        self.coords = np.empty((len(mesh.vertices), 3), np.float32)
+        mesh.vertices.foreach_get("co", self.coords.ravel())
+        self.corners = np.empty((len(mesh.loop_triangles), 3), np.int32)
+        mesh.loop_triangles.foreach_get("loops", self.corners.ravel())
         vertex_ids = np.empty(len(mesh.loops), np.int32)
         mesh.attributes[".corner_vert"].data.foreach_get("value", vertex_ids)
-        triangles = vertex_ids[corners]
-        slots = np.empty(len(triangles), np.int32)
+        self.triangles = vertex_ids[self.corners]
+        self.slots = np.zeros(len(self.triangles), np.int32)
         assignment = mesh.attributes.get("material_index")
         if assignment and len(mesh.materials) > 1:
             material_ids = np.empty(len(mesh.polygons), np.int32)
             assignment.data.foreach_get("value", material_ids)
-            mesh.loop_triangles.foreach_get("polygon_index", slots)
-            slots = material_ids[slots]
-        else:
-            slots.fill(0)
-        base = (0.42, 0.57, 0.70)
-        materials = resolved_materials(mesh, evaluated)
-        from .inspect_shading import material_color
+            mesh.loop_triangles.foreach_get("polygon_index", self.slots)
+            self.slots = material_ids[self.slots]
+        edge_ids = np.empty(len(mesh.loops), np.int32)
+        mesh.attributes[".corner_edge"].data.foreach_get("value", edge_ids)
+        self.edge_uses = np.bincount(edge_ids, minlength=len(mesh.edges))
+        self.boundary_edges = int(np.count_nonzero(self.edge_uses == 1))
+        self.nonmanifold_edges = int(np.count_nonzero((self.edge_uses == 0) | (self.edge_uses > 2)))
+        self.normals = None
+        if shaded:
+            self.normals = np.empty((len(mesh.corner_normals), 3), np.float32)
+            mesh.corner_normals.foreach_get("vector", self.normals.ravel())
+        self.styles = {}
 
-        palette = [material_color(m, base) for m in materials] or [base]
-        colors = np.asarray(palette, dtype=np.float32)[np.clip(slots, 0, len(palette) - 1)]
-        indices = np.empty(len(mesh.loops), np.int32)
-        mesh.attributes[".corner_edge"].data.foreach_get("value", indices)
-        count = np.bincount(indices, minlength=len(mesh.edges))
-        boundary_vertices = None
-        if shading and obj.get("excad_slot") in {"top", "outerwear", "bottom", "footwear"}:
-            edges = np.empty((len(mesh.edges), 2), np.int32)
-            mesh.edges.foreach_get("vertices", edges.ravel())
-            boundary_vertices = np.unique(edges[count == 1])
-            seam = obj.vertex_groups.get("EXCAD seams")
-            if seam:
-                marked = [
-                    v.index for v in mesh.vertices if any(g.group == seam.index and g.weight >= 0.15 for g in v.groups)
-                ]
-                boundary_vertices = np.union1d(boundary_vertices, np.asarray(marked, dtype=np.int32))
-        detail = None
+    def appearance(self, mesh, materials):
+        from .inspect_shading import material_color, material_shading
+
+        key = tuple(materials)
+        if key not in self.styles:
+            base = (0.42, 0.57, 0.70)
+            palette = np.asarray([material_color(m, base) for m in materials] or [base], dtype=np.float32)
+            colors = palette[np.clip(self.slots, 0, len(palette) - 1)]
+            detail = None
+            if self.normals is not None:
+                detail = material_shading(mesh, self.slots, materials, self.corners, self.triangles)
+            self.styles[key] = colors, detail
+        return self.styles[key]
+
+
+def _garment_boundary(obj, mesh, edge_uses):
+    edges = np.empty((len(mesh.edges), 2), np.int32)
+    mesh.edges.foreach_get("vertices", edges.ravel())
+    boundary = np.unique(edges[edge_uses == 1])
+    seam = obj.vertex_groups.get("EXCAD seams")
+    if seam:
+        marked = [v.index for v in mesh.vertices if any(g.group == seam.index and g.weight >= 0.15 for g in v.groups)]
+        boundary = np.union1d(boundary, np.asarray(marked, dtype=np.int32))
+    return boundary
+
+
+def read_surface(obj, graph, shading=False, cache=None):
+    evaluated = obj.evaluated_get(graph)
+    with evaluated_mesh(evaluated) as mesh:
+        if not mesh or not mesh.polygons:
+            return None
+        # to_mesh() copies are temporary. Their addresses can be reused after to_mesh_clear().
+        shared = cache is not None and evaluated.type == "MESH" and obj.mode != "EDIT"
+        key = mesh.as_pointer()
+        geometry = cache.get(key) if shared else None
+        if geometry is None:
+            geometry = MeshGeometry(mesh, shading)
+            if shared:
+                cache[key] = geometry
+        matrix = np.asarray(evaluated.matrix_world, dtype=np.float32)
+        points = geometry.coords @ matrix[:3, :3].T + matrix[:3, 3]
+        colors, style = geometry.appearance(mesh, resolved_materials(mesh, evaluated))
+        detail = boundary = None
         if shading:
-            from .inspect_shading import surface_shading
-
-            detail = surface_shading(mesh, matrix, slots, materials, corners, triangles)
+            normals = geometry.normals @ np.linalg.pinv(matrix[:3, :3])
+            normals /= np.maximum(1e-9, np.linalg.norm(normals, axis=1, keepdims=True))
+            detail = (normals[geometry.corners], *style)
+            if obj.get("excad_slot") in {"top", "outerwear", "bottom", "footwear"}:
+                boundary = _garment_boundary(obj, mesh, geometry.edge_uses)
         return Surface(
             obj,
             points,
-            triangles,
+            geometry.triangles,
             colors,
             np.stack((points.min(0), points.max(0))),
-            int(np.count_nonzero(count == 1)),
-            int(np.count_nonzero((count == 0) | (count > 2))),
+            geometry.boundary_edges,
+            geometry.nonmanifold_edges,
             detail,
-            boundary_vertices,
+            boundary,
         )
 
 
@@ -202,7 +232,8 @@ def surfaces(target="ALL", shading=False):
             if (o.get("excad_human") == obj or o.get("excad_wearer") == obj.name) and o not in objects
         )
     graph = bpy.context.evaluated_depsgraph_get()
-    return [item for obj in visible_geometry(objects) if (item := read_surface(obj, graph, shading))]
+    cache = {}
+    return [item for obj in visible_geometry(objects) if (item := read_surface(obj, graph, shading, cache))]
 
 
 def _inside(surface, point, eps):

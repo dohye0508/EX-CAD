@@ -162,11 +162,7 @@ def warm_materials(obj):
             thumbnail(node.image, persist=True)
 
 
-def surface_shading(mesh, matrix, slots, materials, indices, triangles):
-    normals = np.empty((len(mesh.corner_normals), 3), np.float32)
-    mesh.corner_normals.foreach_get("vector", normals.ravel())
-    normals = normals @ np.linalg.pinv(matrix[:3, :3])
-    normals /= np.maximum(1e-9, np.linalg.norm(normals, axis=1, keepdims=True))
+def material_shading(mesh, slots, materials, indices, triangles):
     default = next((layer for layer in mesh.uv_layers if layer.active_render), mesh.uv_layers.active)
     uv = np.zeros((len(slots), 3, 2), np.float32)
     coordinates = {}
@@ -231,12 +227,17 @@ def surface_shading(mesh, matrix, slots, materials, indices, triangles):
         else:
             finish.append((mat.roughness, mat.metallic) if mat else (0.6, 0))
     palette = np.asarray(finish or [(0.6, 0)], np.float32)
-    return normals[indices], uv, slots, textures, tint_mask, palette[np.clip(slots, 0, len(palette) - 1)]
+    return uv, slots, textures, tint_mask, palette[np.clip(slots, 0, len(palette) - 1)]
 
 
 class Shading:
     def __init__(self, items):
-        self.tris = np.concatenate([s.points[s.triangles] for s in items])
+        if len(items) == 1:
+            self.points, self.triangles = items[0].points, items[0].triangles
+        else:
+            offsets = np.cumsum([0, *(len(s.points) for s in items[:-1])], dtype=np.int32)
+            self.points = np.concatenate([s.points for s in items])
+            self.triangles = np.concatenate([s.triangles + offset for s, offset in zip(items, offsets)])
         self.normals = np.concatenate([s.shading[0] for s in items])
         self.uv = np.concatenate([s.shading[1] for s in items])
         self.colors = np.concatenate([s.colors for s in items])
@@ -268,7 +269,7 @@ class Shading:
             self.tint = np.concatenate(masks), np.concatenate(colors)
 
     def sample(self, faces, points):
-        triangles = self.tris[faces]
+        triangles = self.points[self.triangles[faces]]
         a = triangles[:, 1] - triangles[:, 0]
         b = triangles[:, 2] - triangles[:, 0]
         p = points - triangles[:, 0]

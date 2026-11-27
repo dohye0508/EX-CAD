@@ -325,19 +325,13 @@ def render_inspect(target="ALL", views=("FRONT", "SIDE", "ISO", "TOP"), path=Non
     items = scene_mesh.surfaces(target, shading=True)
     if not items:
         raise ValueError("No visible geometry to inspect")
-    points, faces, offset = [], [], 0
-    for item in items:
-        points.append(item.points)
-        faces.append(item.triangles + offset)
-        offset += len(item.points)
-    vertices = np.concatenate(points)
-    bounds = np.stack((vertices.min(0), vertices.max(0)))
+    bounds = _group_box(items)
+    shading = Shading(items)
     tree = (
         items[0].bvh
         if len(items) == 1
-        else BVHTree.FromPolygons(vertices.tolist(), np.concatenate(faces).tolist(), all_triangles=True)
+        else BVHTree.FromPolygons(shading.points.tolist(), shading.triangles.tolist(), all_triangles=True)
     )
-    shading = Shading(items)
     studio = _studio_lights()
     grid = np.full((size * 2 + 2, size * 2 + 2, 3), 255, np.uint8)
     for i, view in enumerate(views):
