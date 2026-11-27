@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Run with the TRELLIS server's Gradio 4.44.1 Python environment, outside Blender."""
+"""Exercise both TRELLIS queue layouts in the server's Gradio environment, outside Blender."""
 
 import json
 import os
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "excad_addon"))
 from ai_3d_provider import download_model
 
 
-def verify(directory):
+def verify(directory, combined):
     portrait = directory / "input.png"
     Image.new("RGB", (32, 24), (120, 140, 155)).save(portrait)
     payload = json.dumps({"asset": {"version": "2.0"}}).encode()
@@ -54,6 +54,11 @@ def verify(directory):
         events.append(("extract", req.session_hash))
         return str(model)
 
+    def generate_glb(image, gallery, multi, seed, sg, ss, lg, ls, mode, simplify, resolution, req: gr.Request):
+        state = generate(image, gallery, multi, seed, sg, ss, lg, ls, mode, req)
+        output = extract(state, simplify, resolution, req)
+        return state, output, output
+
     with gr.Blocks() as server:
         action = gr.Button()
         photo, gallery = gr.Image(type="pil"), gr.Gallery()
@@ -62,8 +67,13 @@ def verify(directory):
         mode, file = gr.Textbox(), gr.File()
         action.click(start, [], [], api_name="start_session")
         action.click(preprocess, [photo], [photo], api_name="preprocess_image")
-        action.click(generate, [photo, gallery, multi, *numbers, mode], state, api_name="image_to_3d")
-        action.click(extract, [state, *numbers[:2]], file, api_name="extract_glb")
+        generation = [photo, gallery, multi, *numbers, mode]
+        if combined:
+            action.click(generate_glb, [*generation, *numbers[:2]], [state, file, gr.DownloadButton()],
+                         api_name="generate_and_extract_glb")
+        else:
+            action.click(generate, generation, state, api_name="image_to_3d")
+            action.click(extract, [state, *numbers[:2]], file, api_name="extract_glb")
         server.queue()
 
     with socket.socket() as sock:
@@ -92,5 +102,6 @@ def verify(directory):
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
-        verify(Path(tmp))
+        for combined in (False, True):
+            verify(Path(tmp), combined)
     print("TRELLIS TRANSPORT PASS", gr.__version__)

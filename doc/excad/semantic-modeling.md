@@ -101,7 +101,9 @@ assert edited["ok"], edited
 | `MESHY` | 텍스트 또는 이미지. Blender 프로세스에 `MESHY_API_KEY`를 지정한다. [Meshy API](https://docs.meshy.ai/en/api/text-to-3d) |
 | `TRIPO` | 텍스트 또는 이미지. `TRIPO_API_KEY`를 사용한다. [Tripo API](https://developers.tripo3d.ai/en/docs/generation-image-to-model/standard) |
 | `HUNYUAN3D-2` | `HUNYUAN3D_URL`의 기본값은 `http://127.0.0.1:8080`이다. 텍스트 입력에는 서버의 텍스트 변환 파이프라인이 필요하다. 텍스처까지 요청하려면 모델 서버를 `--enable_tex`로 시작하고 `texture: true`를 보낸다. [Hunyuan3D-2 서버](https://github.com/Tencent-Hunyuan/Hunyuan3D-2/blob/main/api_server.py) |
-| `TRELLIS` | 원본 Gradio 이미지 서버에 `image_path`를 전달한다. `TRELLIS_URL`의 기본값은 `http://127.0.0.1:7860`이다. [TRELLIS 서버](https://github.com/microsoft/TRELLIS/blob/main/app.py) |
+| `TRELLIS` | Gradio 이미지 서버에 `image_path`를 전달한다. 원본 서버의 두 단계 생성 방식과 커뮤니티 서버의 `generate_and_extract_glb` 방식을 지원한다. `TRELLIS_URL`의 기본값은 `http://127.0.0.1:7860`이다. [TRELLIS 서버](https://github.com/microsoft/TRELLIS/blob/main/app.py) |
+
+Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 제외한다. [Tencent 모델 라이선스](https://huggingface.co/tencent/Hunyuan3D-2mini/blob/main/LICENSE)
 
 생성된 GLB는 지정한 `height`로 스케일을 맞추고 바닥에 접지한다. 여러 부품이 있으면 반환값의 `name`으로 조립체 전체를 이동할 수 있다. `rig: "PARTS"` 또는 `rig: true`는 리그가 없는 부품에 본과 웨이트를 부여한다. 사람 형태에는 `rig: "HUMANOID"`를 지정한다. 머리·몸·의복이 별도 메시인 인물에도 하나의 스켈레톤을 만들고 같은 웨이트를 의상과 장식에 전이한다. 원본 GLB에 리그가 있으면 그 리그를 사용하며 루트 애니메이션의 이동과 크기를 유지한다. `remesh: true`는 복셀 리메시를 적용한다. `timeout`의 단위는 초이며 기본값은 900이다. 원격 호출과 다운로드는 작업 스레드에서 처리하고 Blender 메인 스레드에서 장면에 가져온다.
 
@@ -132,7 +134,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003
 ```
 
-`overlay.py`는 GPU가 있는 머신에서 창을 열지 않고 실제 GPU 프레임 버퍼에 선과 치수를 그린다. `tests/excad/trellis_transport.py`는 TRELLIS의 Gradio 4.44.1 환경에서 일반 Python으로 실행한다. 이 테스트는 한 세션 안에서 이미지 업로드·전처리·3D 작업·GLB 추출까지 이어지는 전송 경로를 검사한다. 모델 추론에는 별도로 실행 중인 모델 서버나 서비스 계정이 필요하다.
+`overlay.py`는 GPU가 있는 머신에서 창을 열지 않고 실제 GPU 프레임 버퍼에 선과 치수를 그린다. `tests/excad/trellis_transport.py`는 TRELLIS의 Gradio 4.44.1 및 5.34.2 환경에서 일반 Python으로 실행한다. 이 테스트는 한 세션 안에서 이미지 업로드·전처리·3D 작업·GLB 추출까지 이어지는 전송 경로를 검사한다. 모델 추론에는 별도로 실행 중인 모델 서버나 서비스 계정이 필요하다.
 
 ## 모델과 프리뷰
 

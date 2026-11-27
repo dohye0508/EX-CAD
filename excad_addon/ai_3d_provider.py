@@ -156,8 +156,20 @@ def _trellis(base, image, deadline):
     file = json.loads(request(api + "/upload", body, content_type=ctype, timeout=_remaining(deadline)))[0]
     call("start_session", [])
     processed = call("preprocess_image", [{"path": file, "meta": {"_type": "gradio.FileData"}}])[0]
-    call("image_to_3d", [processed, [], 0, 7.5, 12, 3.0, 12, "stochastic"])
-    model = call("extract_glb", [0.95, 1024])[0]
+    generation = [processed, [], 0, 7.5, 12, 3.0, 12, "stochastic"]
+    extraction = [0.95, 1024]
+    merged = functions.get("generate_and_extract_glb")
+    if merged and not {"image_to_3d", "extract_glb"}.issubset(functions):
+        result = call("generate_and_extract_glb", [*generation, *extraction])
+        model = next(
+            (value for key, value in zip(merged["outputs"], result) if components[key] == "downloadbutton" and value),
+            None,
+        )
+        if not model:
+            raise ValueError("The TRELLIS server did not return a downloadable GLB")
+    else:
+        call("image_to_3d", generation)
+        model = call("extract_glb", extraction)[0]
     url = model.get("url") or api + "/file=" + quote(model["path"], safe="/:")
     return request(urljoin(base + "/", url), timeout=_remaining(deadline))
 
