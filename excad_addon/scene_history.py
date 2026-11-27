@@ -39,9 +39,11 @@ class SceneHistory:
         self.history = deque()
         self.owner = None
         self.identities = {}
+        self.relative_paths = {}
 
     def _drop(self, path):
         getattr(self, "identities", {}).pop(path, None)
+        getattr(self, "relative_paths", {}).pop(path, None)
         path.unlink(missing_ok=True)
 
     def scope(self):
@@ -67,6 +69,17 @@ class SceneHistory:
                 for key in DATA
                 for block in getattr(bpy.data, key, ())
                 if not block.library
+            },
+        )
+        if not hasattr(self, "relative_paths"):
+            self.relative_paths = {}
+        self.relative_paths[path] = (
+            bpy.data.filepath,
+            {
+                (key, block.name): block.filepath
+                for key in ("images", "volumes", "fonts")
+                for block in getattr(bpy.data, key, ())
+                if not block.library and block.filepath.startswith("//")
             },
         )
         return path
@@ -135,9 +148,12 @@ class SceneHistory:
             queue.extend(additional)
         old_objects -= protected
         old_collections -= protected
-        disposable = owners - {current} - old_objects - old_collections - protected - shared
+        disposable = {
+            block.session_uid for block in owners - {current} - old_objects - old_collections - protected - shared
+        }
         requested = {}
         root_name, identities = getattr(self, "identities", {}).get(path, (None, {}))
+        initial_file, relative = getattr(self, "relative_paths", {}).get(path, (None, {}))
         existing = {block.session_uid: block for block in protected if not block.library}
         with bpy.data.libraries.load(str(path), link=False) as (source, dest):
             if root_name is None and len(source.scenes) == 1:
@@ -179,17 +195,32 @@ class SceneHistory:
         bpy.data.scenes.remove(current)
         bpy.data.batch_remove(old_objects | old_collections | discard)
         # Remove zero-user dependencies in order without purging unrelated orphan assets.
-        remaining = list(disposable)
-        while True:
-            unused = {i for i in remaining if not i.library and i.users == 0 and not i.use_fake_user}
+        # Removing a mesh can immediately free its embedded shape keys or node tree.
+        # Reacquire live IDs after each pass instead of dereferencing invalid RNA handles.
+        while disposable:
+            unused = {
+                i
+                for i in bpy.data.user_map()
+                if i.session_uid in disposable and not i.library and i.users == 0 and not i.use_fake_user
+            }
             if not unused:
                 break
-            remaining = [i for i in remaining if i not in unused]
+            disposable.difference_update(i.session_uid for i in unused)
             bpy.data.batch_remove(unused)
         for key, names in requested.items():
             for name, block in zip(names, getattr(dest, key)):
                 if block and not block.library:
                     block.name = name
+                    if (key, name) in relative:
+                        value = (
+                            relative[key, name]
+                            if initial_file == bpy.data.filepath
+                            else bpy.path.relpath(block.filepath)
+                        )
+                        if key == "images":
+                            block.filepath_raw = value
+                        else:
+                            block.filepath = value
         for scene in external_copies:
             bpy.data.scenes.remove(scene)
         if external_data:

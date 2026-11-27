@@ -112,6 +112,20 @@ assert not inspect["warnings"], inspect["warnings"]
 assert {c["kind"] for c in inspect["contacts"]} == {"attachment", "garment_seam"}
 assert not run("check_intersections")["intersections"]
 assert not run("resolve_overlaps")["moved"]
+if os.getenv("EXCAD_TEST_VARIANTS"):
+    scene_file = str(Path(os.environ["EXCAD_TEST_VARIANTS"]) / "dressed.blend")
+    bpy.ops.wm.save_as_mainfile(filepath=scene_file, copy=True)
+before = run("scene_digest")["h"]
+skin_file = human.data.materials[0].node_tree.nodes["Skin albedo"].image.filepath
+run("checkpoint", name="Dressed portrait")
+wear(iris_size=0.58, expression="SURPRISED", hands="FIST")
+assert run("scene_digest", since_hash=before).get("changed")
+run("rollback", name="Dressed portrait")
+restored = run("scene_digest", since_hash=before)
+assert restored.get("unchanged"), restored
+human = bpy.context.scene.objects["Portrait"]
+assert human.find_armature() and human.data.shape_keys
+assert human.data.materials[0].node_tree.nodes["Skin albedo"].image.filepath == skin_file
 from excad_addon import scene_mesh
 
 hair = next(o.name for o in bpy.context.scene.objects if o.get("excad_slot") == "hair")
