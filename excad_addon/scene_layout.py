@@ -239,7 +239,8 @@ def _assemblies(names):
 
 def check_intersections(objects=None):
     groups = _assemblies(objects)
-    return {"intersections": [hit for a, b in itertools.combinations(groups, 2) if (hit := a.hit(b))]}
+    hits = [(i, j, hit) for i, j in scene_mesh.nearby_pairs(groups) if (hit := groups[i].hit(groups[j]))]
+    return {"intersections": [hit for _, _, hit in sorted(hits)]}
 
 
 def resolve_overlaps(objects=None, fixed=(), gap=0.01, max_steps=64):
@@ -256,13 +257,19 @@ def resolve_overlaps(objects=None, fixed=(), gap=0.01, max_steps=64):
     locked = {aliases[name] for name in fixed_names}
     original = {s.root: s.root.matrix_world.copy() for s in items}
     ordered = sorted(items, key=lambda s: (s.name not in locked, s.name))
+    boxes = np.asarray([item.bounds for item in ordered])
     moved = set()
     steps = 0
     try:
         for i, item in enumerate(ordered):
-            previous = ordered[:i]
+            previous = boxes[:i]
             while True:
-                touching = [s for s in previous if s.hit(item)]
+                if not len(previous):
+                    break
+                candidates = np.all(
+                    (previous[:, 1] >= item.bounds[0] - 1e-5) & (previous[:, 0] <= item.bounds[1] + 1e-5), axis=1
+                )
+                touching = [ordered[j] for j in np.flatnonzero(candidates) if ordered[j].hit(item)]
                 if not touching:
                     break
                 if item.name in locked or steps >= max_steps:
@@ -276,18 +283,21 @@ def resolve_overlaps(objects=None, fixed=(), gap=0.01, max_steps=64):
                         delta = np.zeros(3)
                         delta[axis] = distance
                         trial = item.bounds + delta
-                        hits = sum(
-                            np.all(np.minimum(s.bounds[1], trial[1]) - np.maximum(s.bounds[0], trial[0]) > 1e-5)
-                            for s in previous
+                        hits = np.count_nonzero(
+                            np.all(
+                                np.minimum(previous[:, 1], trial[1]) - np.maximum(previous[:, 0], trial[0]) > 1e-5,
+                                axis=1,
+                            )
                         )
                         candidates.append((hits, abs(distance), axis, delta))
                 _, _, _, delta = min(candidates, key=lambda c: c[:3])
                 _translate(item.root, delta)
                 item = Assembly.create(item.name, item.root, _items(item.root))
                 ordered[i] = item
+                boxes[i] = item.bounds
                 moved.add(item.name)
                 steps += 1
-        remaining = any(a.hit(b) for a, b in itertools.combinations(ordered, 2))
+        remaining = any(ordered[i].hit(ordered[j]) for i, j in scene_mesh.nearby_pairs(ordered))
         if remaining:
             raise ValueError("A parent transform introduced another collision")
     except Exception:

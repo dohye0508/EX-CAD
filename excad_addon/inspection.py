@@ -2,7 +2,6 @@
 """Quick orthographic inspection. Ray cast evaluated triangles without touching the user's scene."""
 
 from pathlib import Path
-from itertools import combinations
 import struct
 import tempfile
 import time
@@ -222,17 +221,56 @@ def _near_surface(a, b, tolerance):
     return abs(clearance - lift) <= tolerance
 
 
-def _diagnostics(items):
+def _group_box(parts):
+    boxes = np.asarray([p.bounds for p in parts])
+    return np.stack((boxes[:, 0].min(0), boxes[:, 1].max(0)))
+
+
+def _ground_context(items, groups):
+    """Find nearby support for a targeted preview without rendering the supporting objects."""
+    raised = {root for root, parts in groups.items() if min(p.bounds[0, 2] for p in parts) > 1e-4}
+    if not raised:
+        return []
+    pictured = {p.obj for p in items}
+    graph = bpy.context.evaluated_depsgraph_get()
+    others = []
+    context = []
+    for obj in scene_mesh.visible_geometry(bpy.context.scene.objects):
+        if obj in pictured:
+            continue
+        root = scene_mesh.assembly_root(obj)
+        if root in raised:
+            part = scene_mesh.read_surface(obj, graph)
+            if part:
+                groups[root].append(part)
+                context.append(part)
+        elif root not in groups:
+            others.append(obj)
+    boxes = [_group_box(groups[root]) for root in raised]
+    boxes = [box for box in boxes if box[0, 2] > 1e-4]
+    if not boxes:
+        return context
+    margins = [max(1.0, float(np.ptp(box, axis=0).max())) * 1e-4 for box in boxes]
+    for obj in others:
+        ev = obj.evaluated_get(graph)
+        matrix = np.asarray(ev.matrix_world)
+        corners = np.asarray(ev.bound_box) @ matrix[:3, :3].T + matrix[:3, 3]
+        low, high = corners.min(0), corners.max(0)
+        if any(
+            low[2] < box[0, 2]
+            and high[2] >= box[0, 2] - margin
+            and np.all(low[:2] <= box[1, :2] + margin)
+            and np.all(high[:2] >= box[0, :2] - margin)
+            for box, margin in zip(boxes, margins)
+        ):
+            part = scene_mesh.read_surface(obj, graph)
+            if part:
+                context.append(part)
+    return context
+
+
+def _diagnostics(items, targeted=False):
     warnings, contacts, topology = [], [], []
-    for a, b in combinations(items, 2):
-        kind = scene_mesh.overlap_kind(a, b)
-        if kind:
-            detail = {"objects": [a.obj.name, b.obj.name], "detail": kind}
-            contact = _fitted_contact(a, b, kind)
-            if contact:
-                contacts.append({"kind": contact, **detail})
-            else:
-                warnings.append({"kind": "overlap", **detail})
     groups = {}
     for item in items:
         groups.setdefault(scene_mesh.assembly_root(item.obj), []).append(item)
@@ -245,24 +283,36 @@ def _diagnostics(items):
             }
             # Hair cards, open hems and masked MPFB skin intentionally have boundaries.
             (topology if _wearer(item.obj) is not None else warnings).append(record)
+
+    surfaces = items + (_ground_context(items, groups) if targeted else [])
+    boxes = {root: _group_box(parts) for root, parts in groups.items()}
+    margins = {root: max(1.0, float(np.ptp(box, axis=0).max())) * 1e-4 for root, box in boxes.items()}
+    supports = {root: [] for root in groups}
+    roots = [scene_mesh.assembly_root(s.obj) for s in surfaces]
+    for i, j in scene_mesh.nearby_pairs(surfaces, max(margins.values())):
+        a, b = surfaces[i], surfaces[j]
+        if j < len(items):
+            kind = scene_mesh.overlap_kind(a, b)
+            if kind:
+                detail = {"objects": [a.obj.name, b.obj.name], "detail": kind}
+                contact = _fitted_contact(a, b, kind)
+                if contact:
+                    contacts.append({"kind": contact, **detail})
+                else:
+                    warnings.append({"kind": "overlap", **detail})
+        if roots[i] == roots[j]:
+            continue
+        for root, part, other in ((roots[i], a, b), (roots[j], b, a)):
+            if root in groups:
+                bottom, margin = boxes[root][0, 2], margins[root]
+                if bottom > margin and other.bounds[0, 2] < bottom <= other.bounds[1, 2] + margin:
+                    supports[root].append((part, other))
     for root, parts in groups.items():
-        lower = np.min([p.bounds[0] for p in parts], axis=0)
-        upper = np.max([p.bounds[1] for p in parts], axis=0)
-        extent = upper - lower
+        box, margin = boxes[root], margins[root]
+        extent = box[1] - box[0]
         label = next((s.obj.name for s in parts if s.obj.get("excad_character")), root.name)
-        tolerance = max(1.0, float(extent.max())) * 1e-4
-        if lower[2] > tolerance:
-            other_parts = (p for key, group in groups.items() if key != root for p in group)
-            supported = any(
-                o.bounds[0, 2] < lower[2]
-                and o.bounds[1, 2] >= lower[2] - tolerance
-                and np.all(o.bounds[1, :2] + tolerance >= lower[:2])
-                and np.all(o.bounds[0, :2] - tolerance <= upper[:2])
-                and any(_near_surface(p, o, tolerance) for p in parts)
-                for o in other_parts
-            )
-            if not supported:
-                warnings.append({"kind": "above_floor", "object": label, "gap": round(float(lower[2]), 5)})
+        if box[0, 2] > margin and not any(_near_surface(a, b, margin) for a, b in supports[root]):
+            warnings.append({"kind": "above_floor", "object": label, "gap": round(float(box[0, 2]), 5)})
         if min(extent) > 1e-8 and max(extent) / min(extent) > 50:
             warnings.append({"kind": "thin", "object": label})
     return warnings, contacts, topology
@@ -293,7 +343,7 @@ def render_inspect(target="ALL", views=("FRONT", "SIDE", "ISO", "TOP"), path=Non
     for i, view in enumerate(views):
         y, x = (i // 2) * (size + 2), (i % 2) * (size + 2)
         grid[y : y + size, x : x + size] = _tile(tree, bounds, shading, view, size, studio)
-    warnings, contacts, topology = _diagnostics(items)
+    warnings, contacts, topology = _diagnostics(items, targeted=target != "ALL")
     dest = Path(bpy.path.abspath(path)).resolve() if path else None
     directory = dest.parent if dest else Path(tempfile.gettempdir())
     directory.mkdir(parents=True, exist_ok=True)

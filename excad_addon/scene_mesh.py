@@ -86,6 +86,28 @@ def evaluated_mesh(obj):
         obj.to_mesh_clear()
 
 
+def nearby_pairs(items, tolerance=1e-5):
+    """Yield original item indices whose world bounds overlap, including face contact."""
+    if len(items) < 8:
+        yield from combinations(range(len(items)), 2)
+        return
+    boxes = np.asarray([item.bounds for item in items])
+    low, high = boxes[:, 0], boxes[:, 1]
+    tolerance = max(tolerance, float(np.abs(boxes).max()) * 2 * np.finfo(np.float32).eps)
+    span = high.max(0) - low.min(0)
+    axis = int(np.argmax(span / np.maximum((high - low).mean(0), tolerance)))
+    order = np.argsort(low[:, axis], kind="stable")
+    ends = np.searchsorted(low[order, axis], high[order, axis] + tolerance, side="right")
+    for rank, (index, end) in enumerate(zip(order, ends)):
+        candidates = order[rank + 1 : end]
+        if len(candidates):
+            contact = np.all(
+                (low[candidates] <= high[index] + tolerance) & (high[candidates] >= low[index] - tolerance), axis=1
+            )
+            for other in candidates[contact]:
+                yield (index, other) if index < other else (other, index)
+
+
 def read_surface(obj, graph, shading=False):
     evaluated = obj.evaluated_get(graph)
     with evaluated_mesh(evaluated) as mesh:
@@ -148,11 +170,29 @@ def read_surface(obj, graph, shading=False):
         )
 
 
+def visible_geometry(objects):
+    custom_shapes = {
+        bone.custom_shape
+        for rig in bpy.context.scene.objects
+        if rig.type == "ARMATURE"
+        for bone in rig.pose.bones
+        if bone.custom_shape
+    }
+    for obj in objects:
+        if (
+            obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}
+            and obj.visible_get()
+            and obj not in custom_shapes
+            and not obj.get("excad_view_cage")
+        ):
+            yield obj
+
+
 def surfaces(target="ALL", shading=False):
     bpy.context.view_layer.update()
     scene = bpy.context.scene
     if target == "ALL":
-        objects = list(scene.objects)
+        objects = scene.objects
     else:
         obj = scene.objects[target]
         objects = [obj, *obj.children_recursive]
@@ -161,22 +201,8 @@ def surfaces(target="ALL", shading=False):
             for o in scene.objects
             if (o.get("excad_human") == obj or o.get("excad_wearer") == obj.name) and o not in objects
         )
-    custom_shapes = {
-        bone.custom_shape
-        for rig in scene.objects
-        if rig.type == "ARMATURE"
-        for bone in rig.pose.bones
-        if bone.custom_shape
-    }
     graph = bpy.context.evaluated_depsgraph_get()
-    result = []
-    for obj in objects:
-        if (obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}
-                and obj.visible_get() and obj not in custom_shapes and not obj.get("excad_view_cage")):
-            surface = read_surface(obj, graph, shading)
-            if surface:
-                result.append(surface)
-    return result
+    return [item for obj in visible_geometry(objects) if (item := read_surface(obj, graph, shading))]
 
 
 def _inside(surface, point, eps):
