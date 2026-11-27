@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 import bpy
@@ -80,6 +81,22 @@ def check_pattern(reference, model):
 
 outer = {"type": "cone", "height": 0.72, "radius": 0.36, "top_radius": 0.58}
 inner = {"type": "cone", "height": 0.70, "radius": 0.30, "top_radius": 0.52, "center": [0, 0, 0.13]}
+resolution, width = 68, 112
+if "--" in sys.argv:
+    rng = np.random.default_rng(int(sys.argv[sys.argv.index("--") + 1]))
+    outer.update(
+        height=rng.uniform(0.70, 0.80),
+        radius=rng.uniform(0.34, 0.40),
+        top_radius=rng.uniform(0.56, 0.62),
+    )
+    wall = rng.uniform(0.055, 0.085)
+    inner.update(
+        height=outer["height"],
+        radius=outer["radius"] - wall,
+        top_radius=outer["top_radius"] - wall,
+        center=[0, 0, rng.uniform(0.12, 0.17)],
+    )
+    resolution, width = int(rng.integers(62, 79)), int(rng.integers(100, 133))
 tree = {"op": "smooth_subtract", "k": 0.018, "children": [outer, inner]}
 source = run("sdf_generate", name="Source vessel", tree=tree, resolution=112)["name"]
 ref = surfaces(source)[0]
@@ -93,8 +110,8 @@ with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp, poly_type)
         directory.mkdir()
         size = 1.65
-        photograph(ref, directory, poly_type, width=112, size=size)
-        options = dict(image_dir=str(directory), poly_type=poly_type, size=size, center=[0, 0, 0], resolution=68)
+        photograph(ref, directory, poly_type, width=width, size=size)
+        options = dict(image_dir=str(directory), poly_type=poly_type, size=size, center=[0, 0, 0], resolution=resolution)
         hull = run("poly_reconstruct", name="Silhouette hull", use_depth=False, project_colors=False, **options)
         occluded = surfaces(hull["name"])[0].bvh.ray_cast(top, down)[0].z
         result = run("poly_reconstruct", name="Decorated vessel", **options)
