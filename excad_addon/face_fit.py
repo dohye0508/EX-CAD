@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 from urllib.request import urlopen
 
@@ -17,7 +16,9 @@ from mathutils import Vector
 
 from .human_engine import _import_mpfb
 
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+)
 MODEL_SHA = "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff"
 
 
@@ -32,6 +33,7 @@ def cached_download(url, dest, digest):
     def valid(path):
         with path.open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest() == digest
+
     if dest.is_file() and valid(dest):
         return dest
     with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as out:
@@ -47,15 +49,15 @@ def cached_download(url, dest, digest):
     return dest
 
 
-def _python():
+def _python(cache):
     configured = os.getenv("EXCAD_FACE_PYTHON")
     if configured:
         return configured
-    runtime = cache_dir()/"face-runtime"
-    exe = runtime/("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    marker = runtime/"mediapipe-1.2.3.ready"
+    runtime = cache / "face-runtime"
+    exe = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    marker = runtime / "mediapipe-1.2.3.ready"
     if not marker.is_file() or not exe.is_file():
-        host = (["py", "-3.12"] if os.name == "nt" and shutil.which("py") else ["python3.12"])
+        host = ["py", "-3.12"] if os.name == "nt" and shutil.which("py") else ["python3.12"]
         _run(host + ["-m", "venv", str(runtime)], 90)
         _run([str(exe), "-m", "pip", "install", "--disable-pip-version-check", "mediapipe==1.2.3"], 300)
         marker.touch()
@@ -63,45 +65,70 @@ def _python():
 
 
 def _run(args, timeout):
-    result = subprocess.run(args, capture_output=True, timeout=timeout, text=True, encoding="utf8", errors="replace",
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=timeout,
+            text=True,
+            encoding="utf8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Facial landmark runtime timed out after {timeout} seconds") from exc
     if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout).strip().splitlines()[-1])
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else f"Facial landmark runtime exited with status {result.returncode}")
     return result.stdout
 
 
-def landmarks(image_path):
-    image = Path(bpy.path.abspath(image_path))
+def measure_image(image_path, cache):
+    image = Path(image_path)
     if not image.is_file():
         raise FileNotFoundError(image)
-    model = os.getenv("EXCAD_FACE_MODEL") or cached_download(MODEL_URL, cache_dir()/"face_landmarker.task", MODEL_SHA)
-    output = _run([_python(), str(Path(__file__).with_name("face_landmarks.py")), str(image), str(model)], 90)
-    return [Vector(p) for p in json.loads(output)]
+    model = os.getenv("EXCAD_FACE_MODEL") or cached_download(MODEL_URL, cache / "face_landmarker.task", MODEL_SHA)
+    output = _run([_python(cache), str(Path(__file__).with_name("face_landmarks.py")), str(image), str(model)], 90)
+    return measure([Vector(p) for p in json.loads(output)])
 
 
 def measure(p):
     def distance(a, b):
-        return (p[a]-p[b]).length
+        return (p[a] - p[b]).length
+
     width, height = distance(234, 454), distance(10, 152)
     if min(width, height) < 20:
         raise ValueError("Face is too small for reliable fitting")
-    left, right = (p[33]+p[133])*0.5, (p[263]+p[362])*0.5
-    if abs(distance(234, 1)-distance(454, 1)) / width > 0.23:
+    left, right = (p[33] + p[133]) * 0.5, (p[263] + p[362]) * 0.5
+    if abs(distance(234, 1) - distance(454, 1)) / width > 0.23:
         raise ValueError("Use a more frontal view for symmetric fitting")
-    return {"aspect": height/width, "jaw_angle": math.degrees((p[172]-p[152]).angle(p[397]-p[152])),
-            "cheek_width": width/height, "eye_spacing": (left-right).length/width,
-            "eye_size": (distance(33,133)+distance(263,362))/(2*width),
-            "nose_width": distance(98,327)/width, "nose_length": distance(6,2)/height,
-            "mouth_width": distance(61,291)/width}
+    return {
+        "aspect": height / width,
+        "jaw_angle": math.degrees((p[172] - p[152]).angle(p[397] - p[152])),
+        "cheek_width": width / height,
+        "eye_spacing": (left - right).length / width,
+        "eye_size": (distance(33, 133) + distance(263, 362)) / (2 * width),
+        "nose_width": distance(98, 327) / width,
+        "nose_length": distance(6, 2) / height,
+        "mouth_width": distance(61, 291) / width,
+    }
 
 
-def set_targets(obj, values, channel):
+def basemesh_services(obj):
     mpfb = _import_mpfb()
     if not mpfb:
         raise RuntimeError("Enable the MPFB extension before fitting a human")
-    human, targets, _, location = mpfb
+    from bl_ext.blender_org.mpfb.services.objectservice import ObjectService
+
+    if obj is None or not ObjectService.object_is_basemesh(obj):
+        raise ValueError("Facial targets require an MPFB basemesh")
+    return mpfb
+
+
+def set_targets(obj, values, channel):
+    human, targets, _, location = basemesh_services(obj)
     root = Path(location.get_mpfb_data("targets"))
-    paths = {name: root / (name+".target.gz") for name in values}
+    paths = {name: root / (name + ".target.gz") for name in values}
     for path in paths.values():
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -120,6 +147,10 @@ def set_targets(obj, values, channel):
             else:
                 created.append(targets.load_target(obj, str(paths[name]), weight=weight, name=name))
         human.refit(obj)
+        from .wardrobe import refit_eyes
+
+        refit_eyes(obj)
+        obj["excad_character"] = True
         obj[channel] = json.dumps(values)
     except Exception:
         for key in created:
@@ -130,7 +161,10 @@ def set_targets(obj, values, channel):
 
 
 def fit_face_from_image(obj, image_path):
-    ratios = measure(landmarks(image_path))
+    return apply_measurements(obj, measure_image(bpy.path.abspath(image_path), cache_dir()))
+
+
+def apply_measurements(obj, ratios):
     mapping = (
         ("aspect", 1.31, 0.20, "head/head-scale-vert"),
         ("jaw_angle", 102, 21, "chin/chin-width"),
@@ -143,9 +177,9 @@ def fit_face_from_image(obj, image_path):
     )
     values = {}
     for metric, neutral, span, target in mapping:
-        delta = (ratios[metric]-neutral)/span
+        delta = (ratios[metric] - neutral) / span
         direction = ("out" if delta >= 0 else "in") if metric == "eye_spacing" else ("incr" if delta >= 0 else "decr")
-        for side in (("l","r") if "{side}" in target else ("",)):
-            values[target.format(side=side)+"-"+direction] = round(0.15 + 0.35*min(1.0, abs(delta)), 4)
+        for side in ("l", "r") if "{side}" in target else ("",):
+            values[target.format(side=side) + "-" + direction] = round(0.15 + 0.35 * min(1.0, abs(delta)), 4)
     set_targets(obj, values, "excad_face_fit")
-    return {"object": obj.name, "measurements": {k: round(v,4) for k,v in ratios.items()}, "weights": values}
+    return {"object": obj.name, "measurements": {k: round(v, 4) for k, v in ratios.items()}, "weights": values}

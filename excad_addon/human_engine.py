@@ -194,6 +194,7 @@ def create_studio_human(
         if apply_skin:
             _apply_fallback_skin_material(obj, name)
         rig_obj = auto_rig_any_human_mesh(obj, name=f"{name}.rig") if (rig_name and rig_name != "NONE") else None
+        obj["excad_character"] = True
         return obj, rig_obj, "FALLBACK_SDF"
 
     HumanService, TargetService, MaterialService, _ = mpfb
@@ -258,6 +259,7 @@ def create_studio_human(
             bpy.ops.object.modifier_move_to_index(modifier=m.name, index=0)
             break
 
+    basemesh["excad_character"] = True
     return basemesh, rig_obj, "MPFB2"
 
 
@@ -304,6 +306,8 @@ def apply_morph_target(obj, category: str, target_relpath: str, weight: float = 
     TargetService.load_target(obj, full_path, weight=float(weight), name=target_name)
     if obj.find_armature() is not None:
         HumanService.refit(obj)
+    from .wardrobe import refit_eyes
+    refit_eyes(obj)
     return target_name
 
 
@@ -315,6 +319,8 @@ def refit_human_rig(obj) -> bool:
     if obj is None or obj.find_armature() is None:
         return False
     HumanService.refit(obj)
+    from .wardrobe import refit_eyes
+    refit_eyes(obj)
     return True
 
 

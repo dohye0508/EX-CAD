@@ -6,26 +6,47 @@ import gzip
 import math
 from pathlib import Path
 
-import bmesh
 import bpy
-from mathutils import Quaternion, Vector
+import numpy as np
+from mathutils import Matrix, Quaternion, Vector
 
 from .character_stylizer import _pbr_mat, _vgroup_center
 from .face_fit import set_targets
 from .human_assets import equip_asset
 from .human_engine import _import_mpfb
 
-SKINS = {"FAIR_IVORY": (0.80, 0.54, 0.42), "WARM_BEIGE": (0.60, 0.34, 0.22),
-         "TAN": (0.36, 0.18, 0.095), "DEEP": (0.15, 0.067, 0.038)}
-HAIR = {"SHORT": "short02", "BOB": "bob01", "PONYTAIL": "ponytail01", "LONG_STRAIGHT": "long01",
-        "LONG_WAVY": "long01", "CURTAIN_BANGS": "long01"}
-CLOTHES = {"TSHIRT": ("shirts", "toigo_basic_tucked_t-shirt"), "PANTS": ("pants", "toigo_wool_pants"),
-           "SKIRT": ("skirts", "frankyaye_mini_skirt_01"), "SHOES": ("system", "shoes01")}
-EXPRESSIONS = {"SMILE": {"mouth-corner-puller": 0.62, "mouth-upward-retraction": 0.24},
-               "SERIOUS": {"mouth-compression": 0.38, "eyebrows-left-down": 0.25, "eyebrows-right-down": 0.25},
-               "SURPRISED": {"mouth-open": 0.70, "eyebrows-left-up": 0.58, "eyebrows-right-up": 0.58,
-                              "eye-left-opened-up": 0.30, "eye-right-opened-up": 0.30},
-               "WINK": {"eye-left-closure": 0.92, "eyebrows-right-up": 0.16}}
+SKINS = {
+    "FAIR_IVORY": (0.80, 0.54, 0.42),
+    "WARM_BEIGE": (0.60, 0.34, 0.22),
+    "TAN": (0.36, 0.18, 0.095),
+    "DEEP": (0.15, 0.067, 0.038),
+}
+HAIR = {
+    "SHORT": "short02",
+    "BOB": "bob01",
+    "PONYTAIL": "ponytail01",
+    "LONG_STRAIGHT": "long01",
+    "LONG_WAVY": "long01",
+    "CURTAIN_BANGS": "long01",
+}
+CLOTHES = {
+    "TSHIRT": ("shirts", "toigo_basic_tucked_t-shirt"),
+    "PANTS": ("pants", "toigo_wool_pants"),
+    "SKIRT": ("skirts", "frankyaye_mini_skirt_01"),
+    "SHOES": ("system", "shoes01"),
+}
+EXPRESSIONS = {
+    "SMILE": {"mouth-corner-puller": 0.62, "mouth-upward-retraction": 0.24},
+    "SERIOUS": {"mouth-compression": 0.38, "eyebrows-left-down": 0.25, "eyebrows-right-down": 0.25},
+    "SURPRISED": {
+        "mouth-open": 0.70,
+        "eyebrows-left-up": 0.58,
+        "eyebrows-right-up": 0.58,
+        "eye-left-opened-up": 0.30,
+        "eye-right-opened-up": 0.30,
+    },
+    "WINK": {"eye-left-closure": 0.92, "eyebrows-right-up": 0.16},
+}
 
 
 @contextmanager
@@ -58,6 +79,7 @@ def rest_mesh(human):
 def _attach(obj, human):
     obj.parent = human
     obj["excad_wearer"] = human.name
+    obj["excad_human"] = human
     obj.matrix_parent_inverse.identity()
     rig = human.find_armature()
     if rig and not any(m.type == "ARMATURE" for m in obj.modifiers):
@@ -69,8 +91,11 @@ def _attach(obj, human):
 
 def head_weight(obj, human):
     rig = human.find_armature()
-    head = next((b.name for b in rig.data.bones if b.name.lower().split(":")[-1] in {"head","mixamorighead"}),
-                None) if rig else "head"
+    head = (
+        next((b.name for b in rig.data.bones if b.name.lower().split(":")[-1] in {"head", "mixamorighead"}), None)
+        if rig
+        else "head"
+    )
     if not head:
         raise ValueError("Selected armature has no head bone")
     if rig:
@@ -101,48 +126,94 @@ def _eye_centers(human, mesh):
     return left, right
 
 
-def _curtains(human, mesh):
+def _curtains(human, mesh, material):
     left, right = _eye_centers(human, mesh)
-    center = (left+right)/2
-    span = (left-right).length
-    verts, faces = [], []
+    center = (left + right) / 2
+    span = (left - right).length
+    verts, faces, coords = [], [], []
+    surface = _body_surface(human, mesh)
     for side in (-1, 1):
         for lock in range(8):
             start = len(verts)
-            layer = lock/7
-            for j in range(13):
-                t = j/12
-                x = side*span*(0.06 + 1.26*math.sin(t*math.pi/2) + 0.12*layer)
-                y = span*(-0.17 - 0.35*math.sin(t*math.pi) + 0.52*t*t + 0.06*layer)
-                z = span*(1.32-1.95*t + 0.12*layer)
-                w = span*0.09*(0.05 + math.sin(math.pi*t)**0.7)
-                p = center + Vector((x, y, z))
-                verts.extend((p+Vector((-w,0,0)), p+Vector((0,-0.22*w,0)), p+Vector((w,0,0))))
+            layer = lock / 7
+            for j in range(17):
+                t = j / 16
+                x = side * span * (0.02 + 0.16 * layer + (1.13 + 0.10 * layer) * math.sin(t * math.pi / 2))
+                z = span * (1.22 + 0.16 * layer - (1.69 + 0.35 * layer) * t * t)
+                p = center + Vector((x, -2 * span, z))
+                forehead = surface.ray_cast(p, (0, 1, 0), 4 * span)[0]
+                p.y = (forehead.y if forehead else center.y + span * 0.17) - span * (0.065 + 0.04 * layer)
+                w = span * 0.075 * (0.03 + math.sin(math.pi * t) ** 0.6)
+                verts.extend((p + Vector((-w, 0, 0)), p + Vector((0, -0.22 * w, 0)), p + Vector((w, 0, 0))))
+                # Sample an authored lock from the same CC0 atlas as the rest of the hair.
+                coords.extend((0.14 + layer * 0.07 + d, 0.94 - 0.87 * t) for d in (-0.035, 0, 0.035))
                 if j:
-                    k = start+(j-1)*3
-                    faces.extend(((k,k+1,k+4,k+3), (k+1,k+2,k+5,k+4)))
-    obj = _object(human, "Curtain fringe", verts, faces, _pbr_mat("EXCAD Chestnut", (0.064,0.026,0.014), 0.40))
+                    k = start + (j - 1) * 3
+                    faces.extend(((k, k + 1, k + 4, k + 3), (k + 1, k + 2, k + 5, k + 4)))
+    obj = _object(human, "Curtain fringe", verts, faces, material)
+    uv = obj.data.uv_layers.new(name="Hair locks")
+    for loop in obj.data.loops:
+        uv.uv[loop.index].vector = coords[loop.vertex_index]
     head_weight(obj, human)
     return obj
+
+
+def _body_surface(human, mesh):
+    from mathutils.bvhtree import BVHTree
+
+    group = human.vertex_groups["body"].index
+    vertices = {v.index for v in human.data.vertices if any(g.group == group for g in v.groups)}
+    faces = [tuple(f.vertices) for f in mesh.polygons if all(i in vertices for i in f.vertices)]
+    return BVHTree.FromPolygons([v.co for v in mesh.vertices], faces)
+
+
+def _drape_hair(human, obj, mesh, style):
+    surface = _body_surface(human, mesh)
+    eye_l, eye_r = _eye_centers(human, mesh)
+    span = (eye_l - eye_r).length
+    neck = _vgroup_center(human, mesh, ("joint-neck",))
+    if neck is None:
+        return
+    transform = human.matrix_world.inverted() @ obj.matrix_world
+    inverse = transform.to_3x3().inverted()
+    if not obj.data.shape_keys:
+        obj.shape_key_add(name="Basis")
+    mixed = obj.shape_key_add(name="EXCAD hair measurement", from_mix=True)
+    points = [transform @ v.co for v in mixed.data]
+    obj.shape_key_remove(mixed)
+    key = obj.shape_key_add(name="EXCAD hair drape", from_mix=False)
+    for i, original in enumerate(points):
+        p = original.copy()
+        length = max(0, neck.z - p.z)
+        blend = min(1.0, max(0, (neck.z + span * 0.85 - p.z) / (span * 0.80)))
+        if blend:
+            # Retain the head weighting. Bring long tips to the upper back and
+            # let both front and back locks clear the moving shoulder line.
+            p.z += length * (0.25 if style == "PONYTAIL" else 0.39)
+            start = Vector((p.x, neck.y + span * 8, p.z))
+            hit = surface.ray_cast(start, (0, -1, 0), span * 16)[0]
+            if hit:
+                gap = (0.46 if style == "PONYTAIL" else 0.39) * span
+                p.y += max(0, hit.y + gap - p.y) * blend
+        if style == "LONG_WAVY":
+            t = min(1, max(0, (neck.z + span - p.z) / (3.8 * span)))
+            side = -1 if p.x < 0 else 1
+            p.x += side * span * 0.37 * t * math.sin(13 * t + 0.25 * side)
+            p.y += span * 0.10 * t * math.sin(16 * t)
+        key.data[i].co += inverse @ (p - original)
+    key.value = 1
 
 
 def hair_style(human, style):
     obj = equip_asset(human, HAIR[style])
     head_weight(obj, human)
     result = [obj]
-    if style == "LONG_WAVY":
-        key = obj.shape_key_add(name="EXCAD waves", from_mix=True)
-        heights = [p.co.z for p in key.data]
-        high, low = max(heights), min(heights)
-        for p in key.data:
-            t = (high-p.co.z)/max(high-low, 1e-6)
-            side = -1 if p.co.x < 0 else 1
-            p.co.x += side*0.022*t*math.sin(12*t + 0.3*side)
-            p.co.y += 0.015*t*math.sin(14*t + 2*p.co.x)
-        key.value = 1
-    if style == "CURTAIN_BANGS":
+    if style in {"LONG_WAVY", "LONG_STRAIGHT", "PONYTAIL", "CURTAIN_BANGS"}:
         with rest_mesh(human) as mesh:
-            result.append(_curtains(human, mesh))
+            _drape_hair(human, obj, mesh, style)
+            if style == "CURTAIN_BANGS":
+                result.append(_curtains(human, mesh, obj.data.materials[0]))
+        obj["excad_draped_hair"] = True
     return result
 
 
@@ -160,11 +231,17 @@ def transfer_weights(human, obj):
         for m in masked:
             m.show_viewport = False
         bpy.context.view_layer.update()
-        with bpy.context.temp_override(object=human, active_object=human, selected_objects=[human, obj],
-                                       selected_editable_objects=[human, obj]):
-            result = bpy.ops.object.data_transfer(data_type="VGROUP_WEIGHTS", use_create=True,
-                                                  vert_mapping="POLYINTERP_NEAREST", layers_select_src="ALL",
-                                                  layers_select_dst="NAME", mix_mode="REPLACE")
+        with bpy.context.temp_override(
+            object=human, active_object=human, selected_objects=[human, obj], selected_editable_objects=[human, obj]
+        ):
+            result = bpy.ops.object.data_transfer(
+                data_type="VGROUP_WEIGHTS",
+                use_create=True,
+                vert_mapping="POLYINTERP_NEAREST",
+                layers_select_src="ALL",
+                layers_select_dst="NAME",
+                mix_mode="REPLACE",
+            )
         if "FINISHED" not in result:
             raise ValueError("Could not transfer garment weights")
         for group in list(obj.vertex_groups):
@@ -177,53 +254,320 @@ def transfer_weights(human, obj):
         bpy.context.view_layer.update()
 
 
+def _clip_panel(points, distance):
+    """Clip one garment panel to a seam shared by its neighbouring panels."""
+    clipped = []
+    for i, point in enumerate(points):
+        previous = points[i - 1]
+        a, b = distance(previous), distance(point)
+        if (a >= 0) != (b >= 0):
+            clipped.append(previous.lerp(point, a / (a - b)))
+        if b >= 0:
+            clipped.append(point)
+    return clipped
+
+
 def _tailored(human, style):
     with rest_mesh(human) as mesh:
-        body = human.vertex_groups["body"].index
-        indices = {v.index for v in human.data.vertices if any(g.group == body for g in v.groups)}
-        lo = min(mesh.vertices[i].co.z for i in indices)
-        h = max(mesh.vertices[i].co.z for i in indices)-lo
-        center_y = min(mesh.vertices[i].co.y for i in indices if (mesh.vertices[i].co.z-lo)/h > 0.82) + 0.053*h
-        faces, kept = [], {}
+
+        def group_vertices(name):
+            group = human.vertex_groups[name].index
+            return {v.index for v in human.data.vertices if any(g.group == group for g in v.groups)}
+
+        body = group_vertices("body")
+        cloth = group_vertices("helper-tights")
+        height = max(mesh.vertices[i].co.z for i in body) - min(mesh.vertices[i].co.z for i in body)
+
+        def joint(name):
+            point = _vgroup_center(human, mesh, ("joint-" + name,))
+            if point is None:
+                raise ValueError("Missing MPFB garment landmark " + name)
+            return point
+
+        neck, hip = joint("neck"), joint("pelvis")
+        wrists = [(joint(side + "-hand"), joint(side + "-elbow")) for side in ("l", "r")]
+        wrists = [(p, (p - elbow).normalized()) for p, elbow in wrists]
+        allowance = {"JACKET": 0.012, "HOODIE": 0.010, "VNECK_SWEATER": 0.006}[style] * height
+        hem = hip.z + {"JACKET": -0.018, "HOODIE": -0.008, "VNECK_SWEATER": 0.004}[style] * height
+
+        def neckline(p):
+            width = abs(p.x - neck.x) / height
+            front = min(1, max(0, (neck.y - p.y) / (0.04 * height)))
+            drop = {"JACKET": 0.078, "HOODIE": 0.026, "VNECK_SWEATER": 0.075}[style]
+            return neck.z + 0.003 * height - height * front * max(0, drop - width * 1.25) - p.z
+
+        def placket(p):
+            # Two open fronts with a tapered lapel. The back panel stays continuous.
+            return max(abs(p.x - neck.x) - height * 0.007, p.y - neck.y)
+
+        offsets = {i: mesh.vertices[i].co + mesh.vertices[i].normal * allowance for i in cloth}
+        cuts = [lambda p: p.z - hem, neckline]
+        for wrist, along in wrists:
+            cuts.append(lambda p, w=wrist, d=along: -(p - w).dot(d) - 0.009 * height)
+        if style == "JACKET":
+            cuts.append(placket)
+        verts, faces, index = [], [], {}
+
+        def vertex(p):
+            key = tuple(round(c, 6) for c in p)
+            if key not in index:
+                index[key] = len(verts)
+                verts.append(p)
+            return index[key]
+
         for poly in mesh.polygons:
-            if not all(i in indices for i in poly.vertices):
+            if not all(i in cloth for i in poly.vertices):
                 continue
-            x,y,z = poly.center
-            height = (z-lo)/h
-            width = abs(x)/h
-            if height > 0.850 or height < 0.49 or width > 0.43:
-                continue
-            if width < 0.033 and height > 0.805:
-                continue
-            if y < center_y and style in {"VNECK_SWEATER", "JACKET"}:
-                neckline = (0.725 if style == "VNECK_SWEATER" else 0.69) + 1.65*width
-                if height > neckline or (style == "JACKET" and width < 0.0045):
-                    continue
-            faces.append(tuple(kept.setdefault(i,len(kept)) for i in poly.vertices))
-        ease = {"JACKET":0.010, "HOODIE":0.009, "VNECK_SWEATER":0.005}[style]*h
-        verts = [mesh.vertices[i].co + mesh.vertices[i].normal*ease for i in kept]
+            panel = [offsets[i] for i in poly.vertices]
+            for cut in cuts:
+                panel = _clip_panel(panel, cut)
+                if len(panel) < 3:
+                    break
+            if len(panel) >= 3:
+                face = tuple(dict.fromkeys(vertex(p) for p in panel))
+                if len(face) >= 3:
+                    faces.append(face)
         if style == "HOODIE":
-            # A folded hood follows the back of the neck, opening away from the shoulders.
             start = len(verts)
+            for j in range(8):
+                t = j / 7
+                for i in range(41):
+                    a = math.pi * i / 40
+                    verts.append(
+                        neck
+                        + height
+                        * Vector(
+                            (
+                                (0.053 + 0.045 * t) * math.cos(a),
+                                0.022 + (0.035 + 0.069 * t) * math.sin(a),
+                                0.003 - 0.024 * t - (0.018 + 0.077 * t) * math.sin(a),
+                            )
+                        )
+                    )
             for j in range(7):
-                t = j/6
-                for i in range(33):
-                    a = math.pi*i/32
-                    verts.append(Vector((h*(0.041+0.040*t)*math.cos(a),
-                                         center_y + h*(0.035+0.065*t)*math.sin(a),
-                                         lo+h*(0.84-0.08*t*math.sin(a)-0.013*t))))
-            for j in range(6):
-                for i in range(32):
-                    a = start+j*33+i
-                    faces.append((a,a+1,a+34,a+33))
-        tones = {"VNECK_SWEATER": (0.63,0.52,0.39), "JACKET": (0.075,0.115,0.17), "HOODIE": (0.18,0.31,0.29)}
-        obj = _object(human, style.title(), verts, faces, _pbr_mat("EXCAD "+style, tones[style], 0.78, sheen=0.28))
+                for i in range(40):
+                    a = start + j * 41 + i
+                    faces.append((a, a + 1, a + 42, a + 41))
+        colors = {"VNECK_SWEATER": (0.51, 0.36, 0.22), "JACKET": (0.060, 0.092, 0.14), "HOODIE": (0.105, 0.245, 0.22)}
+        color = colors[style]
+        obj = _object(
+            human, style.replace("_", " ").title(), verts, faces, _pbr_mat("EXCAD " + style, color, 0.78, sheen=0.3)
+        )
+    counts = {}
+    for p in obj.data.polygons:
+        for edge in p.edge_keys:
+            counts[edge] = counts.get(edge, 0) + 1
+    borders = {v for edge, n in counts.items() if n == 1 for v in edge}
+    seam = obj.vertex_groups.new(name="EXCAD seams")
+    seam.add(list(borders), 1, "REPLACE")
+    trim = _pbr_mat("EXCAD " + style + " trim", tuple(c * 0.62 for c in color), 0.84, sheen=0.2)
+    obj.data.materials.append(trim)
+    for face in obj.data.polygons:
+        if any(i in borders for i in face.vertices):
+            face.material_index = 1
     transfer_weights(human, obj)
     sub = obj.modifiers.new("Finished neckline and cuffs", "SUBSURF")
     sub.levels = sub.render_levels = 1
-    sol = obj.modifiers.new("Fabric thickness", "SOLIDIFY")
-    sol.thickness, sol.offset = max(0.001, h*0.002), 1
+    solid = obj.modifiers.new("Fabric thickness", "SOLIDIFY")
+    solid.thickness, solid.offset = height * 0.0018, 1
+    solid.material_offset_rim = 1
+    obj["excad_outer_fabric"] = True
     return obj
+
+
+def garment_clearance(human, garment):
+    """Move inward cloth vertices to the fitted skin and mask skin covered by fabric.
+
+    Test coverage away from open hems. A nearest point on a sleeve edge by itself
+    is insufficient evidence that the hand underneath should be hidden.
+    """
+    from mathutils.bvhtree import BVHTree
+    from mathutils.kdtree import KDTree
+
+    with rest_mesh(human) as skin:
+        body_group = human.vertex_groups["body"].index
+        body_ids = {v.index for v in human.data.vertices if any(g.group == body_group for g in v.groups)}
+        points = [v.co.copy() for v in skin.vertices]
+        faces = [tuple(f.vertices) for f in skin.polygons if all(i in body_ids for i in f.vertices)]
+        surface = BVHTree.FromPolygons(points, faces)
+        height = max(points[i].z for i in body_ids) - min(points[i].z for i in body_ids)
+        to_skin = human.matrix_world.inverted() @ garment.matrix_world
+        to_garment = to_skin.to_3x3().inverted()
+        if not garment.data.shape_keys:
+            garment.shape_key_add(name="Basis")
+        # Mixed (fitted) coordinates for measurement, a basis-relative displacement
+        # for the correction. Keeping these apart prevents applying a fit twice.
+        mix = garment.shape_key_add(name="EXCAD fit measurement", from_mix=True)
+        cloth = [to_skin @ v.co for v in mix.data]
+        garment.shape_key_remove(mix)
+        key = garment.shape_key_add(name="EXCAD fabric clearance", from_mix=False)
+        margin = max(0.001, height * 0.0035)
+        for i, p in enumerate(cloth):
+            hit, n, _, distance = surface.find_nearest(p)
+            if hit is None or distance > height * 0.026:
+                continue
+            signed = (p - hit).dot(n)
+            if signed < margin:
+                shift = n * (margin - signed)
+                key.data[i].co += to_garment @ shift
+                cloth[i] = p + shift
+        key.value = 1
+        polygons = [tuple(p.vertices) for p in garment.data.polygons]
+        cover = BVHTree.FromPolygons(cloth, polygons)
+        edge_count = {}
+        for face in polygons:
+            for a, b in zip(face, face[1:] + face[:1]):
+                pair = tuple(sorted((a, b)))
+                edge_count[pair] = edge_count.get(pair, 0) + 1
+        borders = [(cloth[a], cloth[b]) for (a, b), count in edge_count.items() if count == 1]
+        kd = None
+        if borders:
+            samples = []
+            for a, b in borders:
+                steps = max(1, math.ceil((a - b).length / (height * 0.004)))
+                samples.extend(a.lerp(b, i / steps) for i in range(steps + 1))
+            kd = KDTree(len(samples))
+            for i, p in enumerate(samples):
+                kd.insert(p, i)
+            kd.balance()
+        incident = {}
+        for face in faces:
+            for a, b in zip(face, face[1:] + face[:1]):
+                length = (points[a] - points[b]).length
+                incident[a] = max(incident.get(a, 0), length)
+                incident[b] = max(incident.get(b, 0), length)
+        covered = []
+        for i in body_ids:
+            hit, n, _, distance = cover.find_nearest(points[i])
+            if hit is None or distance > height * 0.05 or skin.vertices[i].normal.dot(n) < 0.25:
+                continue
+            if kd and kd.find(hit)[2] < max(height * 0.003, incident.get(i, 0) * 0.68):
+                continue
+            covered.append(i)
+    if covered:
+        name = "EXCAD.Cover." + garment.name
+        group = human.vertex_groups.new(name=name)
+        group.add(covered, 1, "REPLACE")
+        mod = human.modifiers.new(group.name, "MASK")
+        mod.vertex_group = group.name
+        mod.invert_vertex_group = True
+        garment["excad_coverage_group"] = group.name
+
+
+def _clear_hair_faces(human, hair, skin, key, mixed, surfaces):
+    """Clear the collar along the skin normal, including crossings between card vertices."""
+    from mathutils.bvhtree import BVHTree
+
+    body = _body_surface(human, skin)
+    to_skin = human.matrix_world.inverted()
+    normal_to_world = to_skin.to_3x3().transposed()
+    to_hair = hair.matrix_world.to_3x3().inverted()
+    basis = hair.data.shape_keys.reference_key
+    points = [hair.matrix_world @ (p + v.co - b.co) for p, v, b in zip(mixed, key.data, basis.data)]
+    hair.data.calc_loop_triangles()
+    triangles = [tuple(t.vertices) for t in hair.data.loop_triangles]
+    for _ in range(5):
+        tree = BVHTree.FromPolygons(points, triangles, all_triangles=True)
+        corrections = {}
+        for surface in surfaces:
+            if surface is None:
+                continue
+            for hi, fi in tree.overlap(surface.bvh):
+                a, b, c = (Vector(p) for p in surface.points[surface.triangles[fi]])
+                normal = (b - a).cross(c - a).normalized()
+                near = body.find_nearest(to_skin @ ((a + b + c) / 3))
+                if near[0] is None:
+                    continue
+                if normal.dot(normal_to_world @ near[1]) < 0:
+                    normal = -normal
+                for index in triangles[hi]:
+                    distance = 0.0025 - (points[index] - a).dot(normal)
+                    if distance > 0 and (index not in corrections or distance > corrections[index][0]):
+                        corrections[index] = (distance, normal * min(0.018, distance))
+        if not corrections:
+            break
+        for index, (_, shift) in corrections.items():
+            points[index] += shift
+            key.data[index].co += to_hair @ shift
+
+
+def refit_layers(human, omit=()):
+    """Fit outside garments and hanging hair to the final outfit in rest space."""
+    from .scene_mesh import read_surface
+
+    pieces = [o for o in bpy.context.scene.objects if o.get("excad_human") == human and o not in omit]
+    if not any(o.get("excad_outer_fabric") or o.get("excad_draped_hair") for o in pieces):
+        return
+    with rest_mesh(human) as skin_mesh:
+        pelvis = _vgroup_center(human, skin_mesh, ("joint-pelvis",))
+        neck = _vgroup_center(human, skin_mesh, ("joint-neck",))
+        span = (neck - pelvis).length
+        if span < 1e-6:
+            return
+        for outer in sorted(
+            pieces, key=lambda o: (bool(o.get("excad_draped_hair")), o.get("excad_slot") == "outerwear")
+        ):
+            hair = outer.get("excad_draped_hair")
+            if not hair and not outer.get("excad_outer_fabric"):
+                continue
+            slots = (
+                {"top", "outerwear"}
+                if hair
+                else {"bottom", "top"}
+                if outer.get("excad_slot") == "outerwear"
+                else {"bottom"}
+            )
+            obstacles = [o for o in pieces if o != outer and o.get("excad_slot") in slots]
+            key = outer.data.shape_keys.key_blocks.get("EXCAD garment layers") if outer.data.shape_keys else None
+            if key:
+                key.value = 0
+            if not obstacles:
+                continue
+            bpy.context.view_layer.update()
+            graph = bpy.context.evaluated_depsgraph_get()
+            surfaces = [read_surface(o, graph) for o in obstacles]
+            if not outer.data.shape_keys:
+                outer.shape_key_add(name="Basis")
+            mix = outer.shape_key_add(name="EXCAD drape measurement", from_mix=True)
+            points = [v.co.copy() for v in mix.data]
+            outer.shape_key_remove(mix)
+            key = key or outer.shape_key_add(name="EXCAD garment layers", from_mix=False)
+            basis = outer.data.shape_keys.reference_key
+            to_human = human.matrix_world.inverted() @ outer.matrix_world
+            to_world = human.matrix_world.to_3x3()
+            from_world = outer.matrix_world.to_3x3().inverted()
+            for i, local in enumerate(points):
+                key.data[i].co = basis.data[i].co
+                p = to_human @ local
+                if hair and p.z > neck.z + 0.10 * span:
+                    continue
+                direction = Vector((0, 1, 0)) if hair else Vector((p.x - pelvis.x, p.y - pelvis.y, 0)).normalized()
+                if direction.length_squared < 0.5:
+                    continue
+                world = outer.matrix_world @ local
+                out = (to_world @ direction).normalized()
+                reach = (to_world @ (span * direction)).length
+                clearance = 0.026 * reach
+                push = 0
+                for obstacle in surfaces:
+                    if obstacle is None:
+                        continue
+                    start, end = world + out * reach, world - out * reach * 0.3
+                    if any(
+                        max(start[k], end[k]) + clearance < obstacle.bounds[0, k]
+                        or min(start[k], end[k]) - clearance > obstacle.bounds[1, k]
+                        for k in range(3)
+                    ):
+                        continue
+                    hit = obstacle.bvh.ray_cast(start, -out, reach * 1.3)[0]
+                    if hit:
+                        amount = (hit - world).dot(out) + clearance
+                        if 0 < amount < reach * 0.24:
+                            push = max(push, amount)
+                key.data[i].co += from_world @ (out * push)
+            if hair:
+                _clear_hair_faces(human, outer, skin_mesh, key, points, surfaces)
+            key.value = 1
 
 
 def garment(human, style):
@@ -231,10 +575,13 @@ def garment(human, style):
         pack, name = CLOTHES[style]
         obj = equip_asset(human, name, pack)
         transfer_weights(human, obj)
+        garment_clearance(human, obj)
         return obj
-    if style not in {"VNECK_SWEATER","HOODIE","JACKET"}:
+    if style not in {"VNECK_SWEATER", "HOODIE", "JACKET"}:
         raise ValueError(f"Unknown garment {style}")
-    return _tailored(human, style)
+    obj = _tailored(human, style)
+    garment_clearance(human, obj)
+    return obj
 
 
 def skin(human, tone, lip_tint):
@@ -242,69 +589,99 @@ def skin(human, tone, lip_tint):
     mat = _pbr_mat(f"{human.name} Portrait Skin", color, roughness=0.44)
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Subsurface Weight"].default_value = 0.16
-    bsdf.inputs["Subsurface Radius"].default_value = (1.0,0.43,0.23)
+    bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.43, 0.23)
     bsdf.inputs["Subsurface Scale"].default_value = 0.0032
     attr = human.data.color_attributes.get("EXCAD Lips")
-    if attr is None:
-        attr = human.data.color_attributes.new("EXCAD Lips", "FLOAT_COLOR", "POINT")
-        directory = Path(_import_mpfb()[3].get_mpfb_data("targets"))/"mouth"
-        for lip in ("upperlip","lowerlip"):
-            with gzip.open(directory/f"mouth-{lip}-volume-incr.target.gz","rt") as inp:
+    if attr is None or human.data.get("excad_lip_mask_version") != 1:
+        if attr is None:
+            attr = human.data.color_attributes.new("EXCAD Lips", "FLOAT_COLOR", "POINT")
+        colors = np.zeros((len(attr.data), 4), dtype=np.float32)
+        colors[:, 3] = 1.0
+        directory = Path(_import_mpfb()[3].get_mpfb_data("targets")) / "mouth"
+        for lip in ("upperlip", "lowerlip"):
+            with gzip.open(directory / f"mouth-{lip}-volume-incr.target.gz", "rt") as inp:
                 for line in inp:
                     cols = line.split()
                     if len(cols) == 4 and cols[0].isdigit():
-                        weight = min(1, math.sqrt(sum(float(v)**2 for v in cols[1:]))*30)
-                        item = attr.data[int(cols[0])]
-                        w = max(item.color[0], weight)
-                        item.color = (w,w,w,1)
+                        weight = min(1, math.sqrt(sum(float(v) ** 2 for v in cols[1:])) * 30)
+                        index = int(cols[0])
+                        colors[index, :3] = max(colors[index, 0], weight)
+        attr.data.foreach_set("color", colors.ravel())
+        human.data["excad_lip_mask_version"] = 1
     nodes = mat.node_tree.nodes
     mask = nodes.get("Lip mask") or nodes.new("ShaderNodeVertexColor")
     mask.name, mask.layer_name = "Lip mask", attr.name
     mix = nodes.get("Lip tint") or nodes.new("ShaderNodeMixRGB")
     mix.name = "Lip tint"
-    mix.inputs[1].default_value = (*color,1)
-    mix.inputs[2].default_value = (*lip_tint,1)
-    mat.node_tree.links.new(mask.outputs["Color"],mix.inputs[0])
-    mat.node_tree.links.new(mix.outputs[0],bsdf.inputs["Base Color"])
+    mix.inputs[1].default_value = (*color, 1)
+    mix.inputs[2].default_value = (*lip_tint, 1)
+    from .human_assets import install_asset_pack
+
+    pack = install_asset_pack("system")
+    entry = pack / "skins" / "young_caucasian_female" / "young_caucasian_female.mhmat"
+    texture = next(
+        line.split(maxsplit=1)[1]
+        for line in entry.read_text(encoding="utf8").splitlines()
+        if line.startswith("diffuseTexture ")
+    )
+    albedo = nodes.get("Skin albedo") or nodes.new("ShaderNodeTexImage")
+    albedo.name = "Skin albedo"
+    albedo.image = bpy.data.images.load(str(entry.parent / texture), check_existing=True)
+    tint = nodes.get("Skin tone") or nodes.new("ShaderNodeVectorMath")
+    tint.name, tint.operation = "Skin tone", "MULTIPLY"
+    factor = [v / r for v, r in zip(color, (0.73, 0.48, 0.37))]
+    tint.inputs[1].default_value = factor
+    mat["excad_albedo_multiplier"] = factor
+    mat.node_tree.links.new(albedo.outputs["Color"], tint.inputs[0])
+    mat.node_tree.links.new(tint.outputs[0], mix.inputs[1])
+    mat.node_tree.links.new(mask.outputs["Color"], mix.inputs[0])
+    mat.node_tree.links.new(mix.outputs[0], bsdf.inputs["Base Color"])
     if human.data.materials:
         human.data.materials[0] = mat
     else:
         human.data.materials.append(mat)
+    from .inspect_shading import warm_materials
+
+    warm_materials(human)
 
 
 def eyes(human, iris_color, iris_size):
     if not 0.2 <= iris_size <= 0.75:
         raise ValueError("iris_size is the fraction of eyeball radius, from 0.2 to 0.75")
-    white = _pbr_mat("EXCAD Sclera", (0.82,0.84,0.80), 0.18)
-    iris = _pbr_mat(human.name+" Iris", iris_color, 0.18)
-    pupil = _pbr_mat("EXCAD Pupil", (0.005,0.006,0.007), 0.1)
+    white = _pbr_mat("EXCAD Sclera", (0.82, 0.84, 0.80), 0.18)
+    iris = _pbr_mat(human.name + " Iris", iris_color, 0.18)
+    pupil = _pbr_mat("EXCAD Pupil", (0.005, 0.006, 0.007), 0.1)
     with rest_mesh(human) as mesh:
         centers = _eye_centers(human, mesh)
-    radius = (centers[0]-centers[1]).length*0.194
+    radius = (centers[0] - centers[1]).length * 0.194
     result = []
-    for center in centers:
+    for side, center in enumerate(centers):
         # Latitude rings around the gaze axis align the pupil and iris boundaries.
-        angles = [0, math.asin(iris_size*0.43), math.asin(iris_size)]
+        angles = [0, math.asin(iris_size * 0.43), math.asin(iris_size)]
         edge = angles[-1]
-        angles.extend(edge+(math.pi-edge)*j/24 for j in range(1,25))
-        coords = [center+Vector((0,-radius,0))]
+        angles.extend(edge + (math.pi - edge) * j / 24 for j in range(1, 25))
+        coords = [center + Vector((0, -radius, 0))]
         faces, slots = [], []
         n = 40
         for j, theta in enumerate(angles[1:-1]):
             for i in range(n):
-                phi = math.tau*i/n
-                coords.append(center+radius*Vector((math.sin(theta)*math.cos(phi),-math.cos(theta),
-                                                    math.sin(theta)*math.sin(phi))))
-                a,b = 1+j*n+i, 1+j*n+(i+1)%n
-                faces.append((0,a,b) if j == 0 else (a-n,a,b,b-n))
+                phi = math.tau * i / n
+                coords.append(
+                    center
+                    + radius
+                    * Vector((math.sin(theta) * math.cos(phi), -math.cos(theta), math.sin(theta) * math.sin(phi)))
+                )
+                a, b = 1 + j * n + i, 1 + j * n + (i + 1) % n
+                faces.append((0, a, b) if j == 0 else (a - n, a, b, b - n))
                 slots.append(2 if j == 0 else 1 if j == 1 else 0)
         end = len(coords)
-        coords.append(center+Vector((0,radius,0)))
+        coords.append(center + Vector((0, radius, 0)))
         for i in range(n):
-            faces.append((end-n+i,end,end-n+(i+1)%n))
+            faces.append((end - n + i, end, end - n + (i + 1) % n))
             slots.append(0)
         obj = _object(human, "Portrait eye", coords, faces, white)
         obj.data.materials.append(iris)
+        obj["excad_eye_side"], obj["excad_eye_center"], obj["excad_eye_radius"] = side, list(center), radius
         obj.data.materials.append(pupil)
         for p, slot in zip(obj.data.polygons, slots):
             p.material_index = slot
@@ -313,10 +690,32 @@ def eyes(human, iris_color, iris_size):
     return result
 
 
+def refit_eyes(human):
+    eyes = [o for o in bpy.context.scene.objects if o.get("excad_human") == human and "excad_eye_side" in o]
+    if not eyes:
+        return
+    with rest_mesh(human) as mesh:
+        centers = _eye_centers(human, mesh)
+    radius = (centers[0] - centers[1]).length * 0.194
+    for eye in eyes:
+        center = centers[eye["excad_eye_side"]]
+        old = Vector(eye["excad_eye_center"])
+        scale = radius / eye["excad_eye_radius"]
+        if (center - old).length < 1e-7 and abs(scale - 1) < 1e-7:
+            continue
+        local = eye.matrix_world.inverted() @ human.matrix_world
+        if eye.data.users > 1:
+            eye.data = eye.data.copy()
+        eye.data.transform(
+            Matrix.Translation(local @ center) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-(local @ old))
+        )
+        eye["excad_eye_center"], eye["excad_eye_radius"] = list(center), radius
+
+
 def expression(human, preset):
     # The bundled facial units use a shared topology; this is an expression library,
     # independent of portrait appearance and of the subject in a reference image.
-    targets = {"expression/units/caucasian/"+name: value for name,value in EXPRESSIONS[preset].items()}
+    targets = {"expression/units/caucasian/" + name: value for name, value in EXPRESSIONS[preset].items()}
     set_targets(human, targets, "excad_expression")
 
 
@@ -324,21 +723,42 @@ def hand_pose(human, preset):
     rig = human.find_armature()
     if not rig:
         raise ValueError("Finger poses require a character armature")
-    amount = {"OPEN":0.0, "RELAXED":0.22, "FIST":1.15, "POINT":1.02}[preset]
+    amount = {"OPEN": 0.0, "RELAXED": 0.22, "FIST": 1.15, "POINT": 1.02}[preset]
     changes = 0
-    for side in ("l","r"):
-        for finger_id, finger in enumerate(("thumb","index","middle","ring","pinky"),1):
-            for joint in range(1,4):
-                candidates = (f"{finger}_{joint:02}_{side}", f"finger{finger_id}-{joint}.{side.upper()}",
-                              f"mixamorig:{'Left' if side=='l' else 'Right'}Hand{finger.title()}{joint}")
+    for side in ("l", "r"):
+        for finger_id, finger in enumerate(("thumb", "index", "middle", "ring", "pinky"), 1):
+            for joint in range(1, 4):
+                candidates = (
+                    f"{finger}_{joint:02}_{side}",
+                    f"finger{finger_id}-{joint}.{side.upper()}",
+                    f"mixamorig:{'Left' if side == 'l' else 'Right'}Hand{finger.title()}{joint}",
+                )
                 bone = next((rig.pose.bones[n] for n in candidates if n in rig.pose.bones), None)
                 if not bone:
                     continue
-                angle = 0 if preset == "POINT" and finger == "index" else amount*(0.52 if finger=="thumb" else 1)
+                angle = 0 if preset == "POINT" and finger == "index" else amount * (0.52 if finger == "thumb" else 1)
                 bone.rotation_mode = "QUATERNION"
-                bone.rotation_quaternion = Quaternion((1,0,0), angle)
+                bone.rotation_quaternion = Quaternion((1, 0, 0), angle)
                 changes += 1
     if not changes:
         raise ValueError("Armature has no recognized finger bones")
     bpy.context.view_layer.update()
     return changes
+
+
+def remove_wearables(human, objects):
+    keys = ("excad_mask_group", "excad_coverage_group")
+    removed_masks = {o.get(k) for o in objects for k in keys} - {None}
+    for obj in objects:
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if isinstance(mesh, bpy.types.Mesh) and not mesh.users:
+            bpy.data.meshes.remove(mesh)
+    active_masks = {o.get(k) for o in bpy.context.scene.objects if o.get("excad_human") == human for k in keys}
+    for name in removed_masks - active_masks:
+        for mod in list(human.modifiers):
+            if mod.type == "MASK" and mod.vertex_group == name:
+                human.modifiers.remove(mod)
+        group = human.vertex_groups.get(name)
+        if group is not None:
+            human.vertex_groups.remove(group)

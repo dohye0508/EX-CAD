@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 import math
+import json
 import bpy
 import bmesh
 from mathutils import Vector
@@ -429,22 +430,69 @@ def style_character(human, options):
     from .human_assets import equip_asset
     if human is None or human.type != "MESH":
         raise ValueError("Specify the MPFB basemesh to style")
-    created = []
-    if options.get("skin") or "lip_tint" in options:
-        wardrobe.skin(human, options.get("skin", "WARM_BEIGE"), options.get("lip_tint", (0.40,0.105,0.10)))
-    if options.get("eyes") or "iris_color" in options or "iris_size" in options:
-        created.extend(wardrobe.eyes(human, options.get("iris_color", (0.10,0.055,0.024)),
-                                     options.get("iris_size", 0.52)))
-    if options.get("lashes"):
-        created.append(equip_asset(human, "eyelashes02"))
-    if options.get("teeth"):
-        created.append(equip_asset(human, "teeth_base"))
-    if isinstance(options.get("hair"), str):
-        created.extend(wardrobe.hair_style(human, options["hair"]))
+    from .face_fit import basemesh_services
+    basemesh_services(human)
+    saved=json.loads(human.get("excad_portrait_settings","{}"))
+    settings={**saved,**{k:options[k] for k in ("iris_color","iris_size","skin","lip_tint") if k in options}}
     garments = options.get("clothes", [])
-    for garment in ([garments] if isinstance(garments,str) else garments):
-        created.append(wardrobe.garment(human, garment))
-    if "expression" in options:
-        wardrobe.expression(human, options["expression"])
-    bones = wardrobe.hand_pose(human, options["hands"]) if "hands" in options else 0
-    return {"object": human.name, "added": [o.name for o in created], "posed_fingers": bones}
+    if isinstance(garments, str):
+        garments = [garments]
+    garment_slots = {"TSHIRT":"top", "VNECK_SWEATER":"top", "HOODIE":"top", "JACKET":"outerwear",
+                     "PANTS":"bottom", "SKIRT":"bottom", "SHOES":"footwear"}
+    for value in garments:
+        if value not in garment_slots:
+            raise ValueError(f"Unknown garment {value}")
+    for name, allowed in (("skin", wardrobe.SKINS), ("expression", wardrobe.EXPRESSIONS),
+                          ("hands", ("OPEN","POINT","FIST","RELAXED"))):
+        if name in options and options[name] not in allowed:
+            raise ValueError(f"Unknown {name} preset")
+    hair = options.get("hair")
+    if isinstance(hair,str) and hair not in wardrobe.HAIR:
+        raise ValueError(f"Unknown hair style {hair}")
+    if len({garment_slots[g] for g in garments}) != len(garments):
+        raise ValueError("Choose one garment per clothing layer")
+    if not 0.2 <= options.get("iris_size",0.52) <= 0.75:
+        raise ValueError("iris_size must be between 0.2 and 0.75")
+    for name in ("iris_color","lip_tint"):
+        if name in options and (len(options[name]) != 3 or any(not 0<=v<=1 for v in options[name])):
+            raise ValueError(f"{name} must be a linear RGB triple")
+    previous = set(bpy.context.scene.objects)
+    replaced = set()
+    if "clothes" in options and not garments:
+        replaced.update(garment_slots.values())
+    replaced.update(k for k in ("eyes","teeth","lashes") if options.get(k) is False)
+    if "hair" in options and hair is None:
+        replaced.add("hair")
+    created = []
+    def store(slot, items):
+        replaced.add(slot)
+        for obj in items:
+            obj["excad_slot"] = slot
+        created.extend(items)
+    try:
+        if options.get("eyes") or "iris_color" in options or "iris_size" in options:
+            store("eyes", wardrobe.eyes(human, settings.get("iris_color", (0.10,0.055,0.024)),
+                                        settings.get("iris_size", 0.52)))
+        if options.get("lashes"):
+            store("lashes",[equip_asset(human,"eyelashes02")])
+        if options.get("teeth"):
+            store("teeth",[equip_asset(human,"teeth_base")])
+        if isinstance(hair,str):
+            store("hair",wardrobe.hair_style(human,hair))
+        for item in garments:
+            store(garment_slots[item],[wardrobe.garment(human,item)])
+        if options.get("skin") or "lip_tint" in options:
+            wardrobe.skin(human,settings.get("skin","WARM_BEIGE"),settings.get("lip_tint",(0.40,0.105,0.10)))
+        if "expression" in options:
+            wardrobe.expression(human,options["expression"])
+        bones = wardrobe.hand_pose(human,options["hands"]) if "hands" in options else 0
+        old = [o for o in previous if o.get("excad_human")==human and o.get("excad_slot") in replaced]
+        if "clothes" in options or "hair" in options:
+            wardrobe.refit_layers(human,old)
+    except Exception:
+        wardrobe.remove_wearables(human,set(bpy.context.scene.objects)-previous)
+        raise
+    wardrobe.remove_wearables(human,old)
+    human["excad_portrait_settings"]=json.dumps(settings,separators=(",",":"))
+    human["excad_character"]=True
+    return {"object":human.name,"added":[o.name for o in created],"posed_fingers":bones}
