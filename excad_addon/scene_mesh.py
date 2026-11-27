@@ -410,10 +410,16 @@ def _project_vertices(subject, other, shift, sign, best):
     return best
 
 
-def _project_edges(surface, shift, limit, bottom):
+def _project_edges(surface, shift, limit, bottom, low_xy, high_xy):
     tris = surface.triangles
     heights = surface.points[tris, 2] + shift[2]
     tri = tris[heights.min(axis=1) <= limit] if bottom else tris[heights.max(axis=1) >= limit]
+    # A small object on a large terrain can share a height with thousands of
+    # remote edges. Only triangles inside the shared footprint can touch.
+    low, high = low_xy - shift[:2], high_xy - shift[:2]
+    for axis in range(2):
+        values = surface.points[tri, axis]
+        tri = tri[(values.max(axis=1) >= low[axis]) & (values.min(axis=1) <= high[axis])]
     edges = np.concatenate((tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]))
     pairs = np.unique(np.sort(edges, axis=1), axis=0)
     return surface.points[pairs] + shift
@@ -438,8 +444,10 @@ def vertical_clearance(upper, lower, shift=(0, 0, 0), best=float("inf")):
         best = _project_vertices(lower, upper, -shift, 1, best)
     if best <= 1e-6:
         return best
-    above = _project_edges(upper, shift, lower.bounds[1, 2] + best, True)
-    below = _project_edges(lower, np.zeros(3), lo[2] - best, False)
+    low_xy = np.maximum(lo[:2], lower.bounds[0, :2]) - 1e-6
+    high_xy = np.minimum(hi[:2], lower.bounds[1, :2]) + 1e-6
+    above = _project_edges(upper, shift, lower.bounds[1, 2] + best, True, low_xy, high_xy)
+    below = _project_edges(lower, np.zeros(3), lo[2] - best, False, low_xy, high_xy)
     if not len(above) or not len(below):
         return best
     # Fewer scalar iterations for a dense asset sitting on a simple support.
