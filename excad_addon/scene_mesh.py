@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Evaluated world-space surfaces used by inspection and scene layout."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import combinations
 
@@ -72,10 +73,22 @@ def resolved_materials(mesh, evaluated):
     ]
 
 
+@contextmanager
+def evaluated_mesh(obj):
+    """Borrow the evaluated mesh; Blender needs a temporary copy for converted and edit-mode objects."""
+    if obj.type == "MESH" and obj.original.mode != "EDIT":
+        yield obj.data
+        return
+    mesh = obj.to_mesh()
+    try:
+        yield mesh
+    finally:
+        obj.to_mesh_clear()
+
+
 def read_surface(obj, graph, shading=False):
     evaluated = obj.evaluated_get(graph)
-    mesh = evaluated.to_mesh()
-    try:
+    with evaluated_mesh(evaluated) as mesh:
         if not mesh or not mesh.polygons:
             return None
         mesh.calc_loop_triangles()
@@ -133,8 +146,6 @@ def read_surface(obj, graph, shading=False):
             detail,
             boundary_vertices,
         )
-    finally:
-        evaluated.to_mesh_clear()
 
 
 def surfaces(target="ALL", shading=False):

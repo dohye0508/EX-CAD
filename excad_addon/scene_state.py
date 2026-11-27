@@ -7,6 +7,8 @@ import json
 import bpy
 import numpy as np
 
+from .scene_mesh import evaluated_mesh, resolved_materials
+
 
 def _feed(h, value):
     h.update(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
@@ -80,13 +82,13 @@ def _shader(tree, images, visited):
         group = getattr(node, "node_tree", None)
         if group:
             settings["group"] = _shader(group, images, visited | {tree})
-        _feed(h, [node.name, node.bl_idname, inputs, settings])
+        _feed(h, [node.name, node.bl_idname, node.mute, inputs, settings])
     return h.hexdigest()
 
 
 def _material(mat, images):
     h = hashlib.blake2s(digest_size=8)
-    _feed(h, list(mat.diffuse_color))
+    _feed(h, [list(mat.diffuse_color), mat.roughness, mat.metallic])
     if mat.use_nodes and mat.node_tree:
         _feed(h, _shader(mat.node_tree, images, set()))
     return h.hexdigest()
@@ -99,7 +101,8 @@ def rows(include_all=False):
     materials = {}
     images = {}
     for obj in sorted(bpy.context.scene.objects, key=lambda o: o.name):
-        if not include_all and obj.type in {"CAMERA", "LIGHT"}:
+        if (not include_all and obj.type in {"CAMERA", "LIGHT"}
+                and not obj.get("excad_light") and "excad_view_index" not in obj):
             continue
         ev = obj.evaluated_get(graph)
         h = hashlib.blake2s(digest_size=8)
@@ -110,26 +113,26 @@ def rows(include_all=False):
                 obj.parent.name if obj.parent else "",
                 obj.hide_viewport,
                 obj.hide_render,
+                obj.visible_get(),
                 obj.get("excad_tree", ""),
                 list(obj.color),
             ],
         )
         verts = faces = 0
         if ev.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}:
-            mesh = ev.to_mesh()
-            try:
+            with evaluated_mesh(ev) as mesh:
                 if mesh:
                     verts, faces = len(mesh.vertices), len(mesh.polygons)
                     for items, prop, dtype, n in (
                         (mesh.vertices, "co", np.float32, 3),
+                        (mesh.edges, "vertices", np.int32, 2),
                         (mesh.loops, "vertex_index", np.int32, 1),
+                        (mesh.polygons, "loop_start", np.int32, 1),
                         (mesh.polygons, "material_index", np.int32, 1),
                     ):
                         data = np.empty(len(items) * n, dtype=dtype)
                         items.foreach_get(prop, data)
                         h.update(data.tobytes())
-                    from .scene_mesh import resolved_materials
-
                     for mat in resolved_materials(mesh, ev):
                         if mat:
                             if mat.name not in materials:
@@ -148,15 +151,18 @@ def rows(include_all=False):
                         attr.data.foreach_get("color", rgba)
                         _feed(h, [attr.name, attr.domain, attr.data_type])
                         h.update(rgba.tobytes())
-            finally:
-                ev.to_mesh_clear()
         elif ev.type == "ARMATURE":
             for b in ev.pose.bones:
                 h.update(np.asarray(b.matrix, dtype="<f4").tobytes())
         elif ev.type == "LIGHT":
-            _feed(h, [ev.data.type, ev.data.energy, list(ev.data.color)])
+            light = ev.data
+            _feed(h, [light.type, light.energy, list(light.color)])
+            if light.type == "AREA":
+                _feed(h, [light.shape, light.size, light.size_y, light.spread])
         elif ev.type == "CAMERA":
-            _feed(h, [ev.data.type, ev.data.lens, ev.data.ortho_scale])
+            camera = ev.data
+            _feed(h, [camera.type, camera.lens, camera.ortho_scale, camera.clip_start, camera.clip_end,
+                      camera.shift_x, camera.shift_y])
         result.append(
             [
                 obj.name,

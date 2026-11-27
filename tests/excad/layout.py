@@ -224,6 +224,9 @@ run("set_material", object="Planter", preset="CERAMIC", color=[0.095, 0.40, 0.36
 run("set_material", object="Stand", preset="WOOD")
 lights = run("light_studio", target="Planter", style="SOFT")["lights"]
 assert len(lights) == 3
+soft = run("scene_digest")["h"]
+run("light_studio", target="Planter", style="PRODUCT")
+assert {row[0] for row in run("scene_digest", since_hash=soft)["changed"]} == set(lights)
 light_digest = run("scene_digest", include_all=True)["h"]
 assert run("light_studio", target="Planter", style="PRODUCT", power=1.1)["lights"] == lights
 assert len(run("scene_digest", include_all=True, since_hash=light_digest)["changed"]) == 3
