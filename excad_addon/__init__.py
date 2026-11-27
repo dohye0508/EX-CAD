@@ -1186,6 +1186,7 @@ def reload_addon(server):
         "image_colors",
         "inspect_shading",
         "scene_mesh",
+        "humanoid_skin",
         "inspection",
         "uv_bake",
         "sdf_engine",

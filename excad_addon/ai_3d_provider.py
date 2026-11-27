@@ -6,13 +6,13 @@ import json
 import math
 import mimetypes
 import os
-from pathlib import Path
 import tempfile
 import time
+import uuid
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
-import uuid
 
 CLOUD = {"MESHY": "https://api.meshy.ai/openapi", "TRIPO": "https://openapi.tripo3d.ai/v3"}
 
@@ -192,6 +192,7 @@ def download_model(prompt="", image_path=None, provider="HUNYUAN3D-2", timeout=9
 def _dimensions(meshes):
     import bpy
     from mathutils import Vector
+
     from .scene_mesh import read_surface
 
     graph = bpy.context.evaluated_depsgraph_get()
@@ -203,7 +204,7 @@ def _dimensions(meshes):
     return low, high
 
 
-def _normalize(roots, meshes, height):
+def _normalize(roots, meshes, height, name):
     import bpy
     from mathutils import Matrix, Vector
 
@@ -212,9 +213,22 @@ def _normalize(roots, meshes, height):
         raise ValueError("GLB has no height")
     center = Vector(((low.x + high.x) / 2, (low.y + high.y) / 2, low.z))
     matrix = Matrix.Scale(height / (high.z - low.z), 4) @ Matrix.Translation(-center)
-    for root in roots:
-        root.matrix_world = matrix @ root.matrix_world
+    pivot = None
+    if any(root.animation_data for root in roots):
+        # Keep animation curves in their authored units. Scaling or translating the
+        # animated root itself would be undone on the next frame evaluation.
+        pivot = bpy.data.objects.new(name + " placement", None)
+        bpy.context.collection.objects.link(pivot)
+        for root in roots:
+            world = root.matrix_world.copy()
+            root.parent = pivot
+            root.matrix_world = world
+        pivot.matrix_world = matrix
+    else:
+        for root in roots:
+            root.matrix_world = matrix @ root.matrix_world
     bpy.context.view_layer.update()
+    return pivot
 
 
 def _rig_parts(meshes, name):
@@ -257,8 +271,9 @@ def _rig_parts(meshes, name):
 
 def import_model(path, height=1.0, remesh=False, rig=False, name="Generated model"):
     import bpy
-    from .asset_fetcher import import_asset_file, _root_objects
-    from .human_engine import auto_rig_any_human_mesh
+
+    from .asset_fetcher import _root_objects, bone_shapes, import_asset_file
+    from .humanoid_skin import fit_imported
 
     mode = "PARTS" if rig is True else "NONE" if not rig else str(rig).upper()
     if not math.isfinite(height) or height <= 0 or mode not in {"NONE", "PARTS", "HUMANOID"} or not name.strip():
@@ -281,6 +296,8 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
     selected, active = list(bpy.context.selected_objects), bpy.context.view_layer.objects.active
     try:
         imported = import_asset_file(str(path))
+        controls = bone_shapes(imported)
+        imported = [obj for obj in imported if obj not in controls and obj.name in bpy.context.scene.objects]
         meshes = [o for o in imported if o.type == "MESH"]
         if not meshes:
             raise ValueError("GLB contains no mesh")
@@ -299,18 +316,21 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
                     if "FINISHED" not in bpy.ops.object.voxel_remesh():
                         raise ValueError(f"Could not remesh {obj.name}")
         bpy.context.view_layer.update()
-        _normalize(_root_objects(imported), meshes, height)
+        placement = _normalize(_root_objects(imported), meshes, height, name)
+        if placement is not None:
+            imported.append(placement)
         loose = [obj for obj in meshes if not obj.find_armature()]
+        rig_obj = None
         if loose and mode == "PARTS":
             rig_obj = _rig_parts(loose, name)
+        elif loose and mode == "HUMANOID":
+            rig_obj = fit_imported(meshes, loose, name)
+        if rig_obj is not None:
             for top in _root_objects(imported):
                 matrix = top.matrix_world.copy()
                 top.parent = rig_obj
                 top.matrix_world = matrix
             imported.append(rig_obj)
-        elif mode == "HUMANOID":
-            for obj in loose:
-                imported.append(auto_rig_any_human_mesh(obj, name=obj.name + " rig"))
         roots = _root_objects(imported)
         if len(roots) == 1:
             model = roots[0]
