@@ -41,6 +41,29 @@ changed = run(
 )
 assert changed["ok"], changed
 
+# Repeatedly compare edits with a checkpoint. Keep that active baseline while
+# evicting older one-off edits from the bounded digest cache.
+housing = bpy.data.objects["Housing"]
+base_x = housing.location.x
+baseline = run({"cmd": "scene_digest"})["h"]
+for i in range(22):
+    housing.location.x = base_x + (i + 1) / 10
+    delta = run({"cmd": "scene_digest", "since_hash": baseline})
+    assert delta.get("delta") and any(r[0] == housing.name for r in delta["changed"]), (i, delta)
+    if i == 0:
+        first_edit = delta["h"]
+    housing.location.x = base_x
+    assert run({"cmd": "scene_digest", "since_hash": baseline}).get("unchanged")
+assert len(bridge._digest_cache) == 16 and set(bridge._sketch_cache) == set(bridge._digest_cache)
+assert "objs" in run({"cmd": "scene_digest", "since_hash": first_edit})
+
+# A reconnecting client may already know the open scene while the bridge is new.
+reconnected = AiBridgeServer()._dispatch_dict
+assert reconnected({"cmd": "scene_digest", "since_hash": baseline}).get("unchanged")
+housing.location.x = base_x + 1
+assert reconnected({"cmd": "scene_digest", "since_hash": baseline}).get("delta")
+housing.location.x = base_x
+
 # Stop between receipt and the main-thread timer. A fresh listener must never run
 # the previous request, even when the client is still waiting for its reply.
 bridge.start(0)

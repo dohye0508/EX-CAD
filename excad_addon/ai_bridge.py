@@ -477,26 +477,26 @@ class AiBridgeServer:
             include_all = bool(data.get("include_all", False))
             since_hash = data.get("since_hash", "")
             cur_hash, rows, sketch = self._build_digest(include_all=include_all)
-            if since_hash and since_hash == cur_hash:
-                return {"ok": True, "unchanged": True, "h": cur_hash}
-
+            prev_map = self._digest_cache.pop(since_hash, None)
+            prev_sketch = self._sketch_cache.get(since_hash)
+            if prev_map is not None:
+                self._digest_cache[since_hash] = prev_map
             cur_map = {r[0]: r for r in rows}
-            added_sketch = {"sketch": sketch} if self._sketch_cache.get(since_hash) != sketch else {}
+            self._digest_cache.pop(cur_hash, None)
+            self._digest_cache[cur_hash] = cur_map
             self._sketch_cache[cur_hash] = sketch
-            if len(self._sketch_cache) > 16:
-                self._sketch_cache.pop(next(iter(self._sketch_cache)))
-            if since_hash and since_hash in self._digest_cache:
-                prev_map = self._digest_cache[since_hash]
+            if len(self._digest_cache) > 16:
+                oldest = next(iter(self._digest_cache))
+                del self._digest_cache[oldest]
+                self._sketch_cache.pop(oldest, None)
+
+            if since_hash == cur_hash:
+                return {"ok": True, "unchanged": True, "h": cur_hash}
+            added_sketch = {"sketch": sketch} if prev_sketch != sketch else {}
+            if prev_map is not None:
                 added_or_mod = [r for k, r in cur_map.items() if prev_map.get(k) != r]
                 removed = [k for k in prev_map if k not in cur_map]
-                self._digest_cache[cur_hash] = cur_map
-                if len(self._digest_cache) > 16:
-                    self._digest_cache.pop(next(iter(self._digest_cache)))
                 return {"ok": True, "h": cur_hash, "delta": True, "changed": added_or_mod, "removed": removed, **added_sketch}
-
-            self._digest_cache[cur_hash] = cur_map
-            if len(self._digest_cache) > 16:
-                self._digest_cache.pop(next(iter(self._digest_cache)))
             return {"ok": True, "h": cur_hash, "objs": rows, **added_sketch}
 
         if cmd == "list":

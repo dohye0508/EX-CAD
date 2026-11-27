@@ -14,7 +14,7 @@ MCP 클라이언트의 stdio 서버 명령에는 `python`을, 인수에는 저�
 | --- | --- |
 | `excad_schema` | 빈 인수로 명령 목록을 읽는다. `topic`에 `sketch`, `cad`, `character`, `organic`, `scene` 중 하나를 주면 해당 필드를 볼 수 있다. |
 | `excad_run` | `steps`에 명령 배열을 주거나 `code`에 DSL을 넣는다. 기본 응답은 실행 횟수와 마지막 결과다. 각 단계의 결과가 필요하면 `return_all`을 사용한다. |
-| `excad_digest` | 처음 응답의 `h`를 저장하고 다음 호출의 `since_hash`에 넣는다. 캐시에 해당 해시가 있으면 바뀐 항목과 삭제된 이름을 돌려준다. |
+| `excad_digest` | 처음 응답의 `h`를 다음 호출의 `since_hash`에 넣으면 바뀐 항목과 삭제된 이름을 받는다. 최근에 조회하거나 기준으로 사용한 해시 16개를 보관하며, 캐시에서 사라진 해시로 요청하면 전체 목록을 보낸다. |
 | `excad_inspect` | `target`에 물체 이름이나 `ALL`을 넣는다. PNG 이미지, 저장 경로, 월드 좌표의 경계 상자와 진단 결과를 돌려준다. |
 
 ## 저장한 피처 레시피 수정하기
@@ -170,6 +170,8 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 | [도자기 전시 장면의 Cycles 렌더](previews/ceramics-exhibit.png) | 사진 피팅 인물, CAD 받침대 두 개, SDF 그릇, TRELLIS 꽃병을 한 장면에 조립한 결과 |
 
 전시 장면에서 왼쪽 받침대의 `height.depth`를 0.72에서 0.81로 바꾸고 SDF 그릇의 입구를 넓힌 뒤 `place_relative`로 다시 접지했다. 저장한 파일을 다시 연 상태에서 공식 MCP 클라이언트로 편집했고, 그릇 바닥의 높이 0.81과 롤백 후 원래 장면 해시를 확인했다.
+
+이 장면의 19개 물체를 요약한 전체 JSON 응답은 1,727바이트다. 받침대 높이와 그릇 위치를 한 배치로 바꾸면 `since_hash` 응답은 두 물체의 변경분 237바이트를 담는다. 편집을 되돌린 뒤 원래 해시로 조회한 응답은 47바이트다. 크기는 브리지 응답의 UTF-8 기준이다.
 
 TRELLIS 실측은 공개 Gradio 모델 서버에 합성 꽃병 이미지 한 장을 보낸 결과다. 생성과 다운로드에는 75.8초가 걸렸다. Blender에서 텍스처 경계의 정점을 연결한 결과 정점 5,885개·삼각형 11,766개이며 열린 경계와 비매니폴드 모서리는 0개였다. [검증에 사용한 TRELLIS 서버](https://huggingface.co/spaces/trellis-community/TRELLIS)
 
