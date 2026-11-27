@@ -186,17 +186,54 @@ class EXCADSceneProps(PropertyGroup):
 
 class EXCAD_OT_install_cc0_assets(Operator):
     bl_idname = "excad.install_cc0_assets"
-    bl_label = "Install MakeHuman CC0 system assets"
+    bl_label = "Install CC0 character assets"
+    _job = None
+
+    @classmethod
+    def poll(cls, context):
+        return cls._job is None
 
     def execute(self, context):
         from .human_assets import install_asset_pack
+        from .face_fit import cache_dir
+
+        if bpy.app.background:
+            try:
+                install_asset_pack("all")
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            return {"FINISHED"}
+        from concurrent.futures import ThreadPoolExecutor
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="EXCAD assets")
+        type(self)._job = pool.submit(install_asset_pack, "all", cache_dir())
+        pool.shutdown(wait=False)
+        self._timer = context.window_manager.event_timer_add(0.25, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, "Downloading the MakeHuman CC0 character packs")
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        job = type(self)._job
+        if event.type != "TIMER" or not job.done():
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        type(self)._job = None
         try:
-            install_asset_pack()
+            path = job.result()
         except (OSError, RuntimeError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        self.report({"INFO"}, "MakeHuman eyes, teeth, clothes and hair are available")
+        self.report({"INFO"}, f"MakeHuman eyes, teeth, hair and wardrobe cached in {path}")
         return {"FINISHED"}
+
+    def cancel(self, context):
+        context.window_manager.event_timer_remove(self._timer)
+        job = type(self)._job
+        if job is not None:
+            job.cancel()
+            type(self)._job = None
 
 
 class EXCAD_OT_human_generate(Operator):
@@ -1119,27 +1156,80 @@ def reload_addon(server):
     import importlib
     import sys
     from . import sketch_overlay
-    registered = hasattr(bpy.types.Scene, "excad")
-    if registered:
-        sketch_overlay.unregister()
-        del bpy.types.Scene.excad
-        for cls in reversed(CLASSES):
-            bpy.utils.unregister_class(cls)
-    modules = ("protocol", "sketch_profiles", "sketch_engine", "feature_geometry", "feature_tree",
-               "human_engine", "asset_fetcher", "polyhedron_engine", "image_sketch_engine",
-               "character_stylizer", "face_fit", "human_assets", "wardrobe", "oneshot_generators",
-               "city_generator", "scene_mesh", "inspection", "uv_bake", "sdf_engine", "ai_3d_provider",
-               "scene_layout", "appearance", "scene_history", "scene_state", "sketch_overlay", "ai_bridge")
+
+    modules = (
+        "protocol",
+        "schema",
+        "sketch_profiles",
+        "sketch_engine",
+        "feature_geometry",
+        "feature_tree",
+        "human_engine",
+        "asset_fetcher",
+        "polyhedron_engine",
+        "image_sketch_engine",
+        "character_stylizer",
+        "face_fit",
+        "human_assets",
+        "wardrobe",
+        "oneshot_generators",
+        "city_generator",
+        "inspect_shading",
+        "scene_mesh",
+        "inspection",
+        "uv_bake",
+        "sdf_engine",
+        "ai_3d_provider",
+        "scene_layout",
+        "appearance",
+        "scene_history",
+        "scene_state",
+        "sketch_overlay",
+        "ai_bridge",
+    )
+    active = hasattr(bpy.types.Scene, "excad")
+    package_name = __name__
+    loaded = [sys.modules[package_name + "." + n] for n in modules if package_name + "." + n in sys.modules]
+    loaded.append(sys.modules[package_name])
+    # Catch syntax errors before touching active operators or RNA properties.
+    from pathlib import Path
+
+    for module in loaded:
+        compile(Path(module.__file__).read_bytes(), module.__file__, "exec")
+    previous = [(module, module.__dict__.copy()) for module in loaded]
+    old_classes, old_properties = CLASSES, EXCADSceneProps
+    removed, added = [], []
     importlib.invalidate_caches()
-    for name in modules:
-        module = sys.modules.get(__name__+"."+name)
-        if module:
+    try:
+        if active:
+            sketch_overlay.unregister()
+            del bpy.types.Scene.excad
+            for cls in reversed(old_classes):
+                bpy.utils.unregister_class(cls)
+                removed.append(cls)
+        for module in loaded:
             importlib.reload(module)
-    package = importlib.reload(sys.modules[__name__])
-    server.__class__ = package.ai_bridge.AiBridgeServer
-    package.ai_bridge.AiBridgeServer._instance = server
-    if registered:
-        for cls in package.CLASSES:
+        package = sys.modules[package_name]
+        if active:
+            for cls in package.CLASSES:
+                bpy.utils.register_class(cls)
+                added.append(cls)
+            bpy.types.Scene.excad = PointerProperty(type=package.EXCADSceneProps)
+            sketch_overlay.register()
+        server.__class__ = package.ai_bridge.AiBridgeServer
+        package.ai_bridge.AiBridgeServer._instance = server
+        server.history.__class__ = package.ai_bridge.SceneHistory
+    except Exception:
+        if active and hasattr(bpy.types.Scene, "excad"):
+            del bpy.types.Scene.excad
+        for cls in reversed(added):
+            bpy.utils.unregister_class(cls)
+        for module, state in previous:
+            module.__dict__.clear()
+            module.__dict__.update(state)
+        for cls in reversed(removed):
             bpy.utils.register_class(cls)
-        bpy.types.Scene.excad = PointerProperty(type=package.EXCADSceneProps)
-        sketch_overlay.register()
+        if active:
+            bpy.types.Scene.excad = PointerProperty(type=old_properties)
+            sketch_overlay.register()
+        raise

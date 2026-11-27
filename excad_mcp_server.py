@@ -20,7 +20,8 @@ def tool(name,description,properties,**schema):
 
 
 TOOLS = [
-    tool("excad_schema","Get the compact Blender command reference.",{}),
+    tool("excad_schema","Get the compact Blender command reference.",
+         {"topic":{"enum":["sketch","cad","character","organic","scene"]}}),
     tool("excad_run","Run a DSL program or an ordered batch in Blender.",
          {"code":{"type":"string"},"steps":{"type":"array","items":{"type":"object"}},
           "return_all":{"type":"boolean"},"stop_on_error":{"type":"boolean"}},

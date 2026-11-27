@@ -2,6 +2,7 @@
 """Exercise layout, transactions, compact deltas, hot reload and the four-tool stdio interface."""
 
 import base64
+import importlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from unittest.mock import patch
 
 import addon_utils
 import bpy
@@ -221,6 +223,21 @@ print("LAYOUT INSPECTION", inspection, flush=True)
 # loopback socket. The background fixture pumps the same main-thread timer as the UI.
 bridge.start(int(os.getenv("EXCAD_TEST_PORT", "0")))
 port = bridge.port
+original_reload = importlib.reload
+
+
+def fail_during_reload(module):
+    if module.__name__.endswith(".scene_state"):
+        raise RuntimeError("Simulated reload error")
+    return original_reload(module)
+
+
+bpy.context.scene.excad.human_preset = "HEROIC_SCULPT"
+with patch.object(importlib, "reload", side_effect=fail_during_reload):
+    failure = bridge._dispatch_dict({"cmd": "reload_addon"})
+assert not failure["ok"] and "Simulated reload error" in failure["error"]
+assert bpy.context.scene.excad.human_preset == "HEROIC_SCULPT"
+assert run("ping")["ok"] and bridge.running
 repo = Path(__file__).resolve().parents[2]
 env = dict(os.environ, EXCAD_PORT=str(port))
 python = Path(sys.prefix) / ("bin/python.exe" if os.name == "nt" else "bin/python3")
@@ -276,5 +293,6 @@ assert {t["name"] for t in messages[2]["tools"]} == {"excad_schema", "excad_run"
 assert all(not m.get("isError") for m in messages[3:]), [m["content"][0] for m in messages[3:]]
 assert base64.b64decode(messages[6]["content"][1]["data"]).startswith(b"\x89PNG")
 assert json.loads(messages[5]["content"][0]["text"])["last"]["port"] == port
+assert bpy.context.scene.excad.human_preset == "HEROIC_SCULPT"
 assert len(bridge._dispatch('{"cmd":"schema"}').encode()) <= 1200
 print("LAYOUT MCP PASS", bpy.app.version_string, port)

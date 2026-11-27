@@ -8,6 +8,7 @@ import queue
 import shlex
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -32,7 +33,7 @@ def _jdump(obj: dict) -> str:
 
 
 COMPACT_SCHEMA = (
-    "JSONL 127.0.0.1:9877. batch{steps:[{cmd,...}],return_all?}; "
+    "JSONL 127.0.0.1:9877. schema{topic?:sketch|cad|character|organic|scene}. batch{steps:[{cmd,...}],return_all?}; "
     "dsl{code:'command {JSON args};command {JSON args}'}; scene_digest{since_hash?}. "
     "Shortcuts: S plane; R u v w h; C u v r; L u v u v; SOLVE; EX depth sym name; "
     "RV deg segments name; H preset; IMG front; POLY faces dir; FIND/USE query; "
@@ -76,6 +77,7 @@ class AiBridgeServer:
         self._sketch_cache = {}
         self._thread = None
         self._queue: queue.Queue = queue.Queue()
+        self._stop_event = threading.Event()
         self._digest_cache: dict[str, dict[str, list]] = {}
 
     @classmethod
@@ -97,9 +99,11 @@ class AiBridgeServer:
             raise
         self.port = sock.getsockname()[1]
         self._socket = sock
+        self._stop_event = threading.Event()
+        self._queue = queue.Queue()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="EXCAD IO")
         self.running = True
-        self._thread = threading.Thread(target=self._server_loop, args=(sock,), daemon=True)
+        self._thread = threading.Thread(target=self._server_loop, args=(sock, self._queue, self._stop_event), daemon=True)
         self._thread.start()
         if not bpy.app.timers.is_registered(self._poll_callback):
             bpy.app.timers.register(self._poll_callback, first_interval=0.02, persistent=True)
@@ -107,6 +111,8 @@ class AiBridgeServer:
 
     def stop(self):
         self.running = False
+        if getattr(self, "_stop_event", None) is not None:
+            self._stop_event.set()
         if self._pending:
             program, future, holder, event = self._pending
             program.close()
@@ -115,6 +121,13 @@ class AiBridgeServer:
             holder["resp"] = _jdump({"ok":False,"error":"Bridge stopped"})
             event.set()
             self._pending = None
+        while True:
+            try:
+                _, holder, event = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            holder["resp"] = _jdump({"ok": False, "error": "Bridge stopped"})
+            event.set()
         if self._pool:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._pool = None
@@ -328,17 +341,57 @@ class AiBridgeServer:
             cmd = data.get("cmd", "")
             if cmd in {"batch", "dsl"}:
                 return (yield from self._sequence(cmd, data))
+            if cmd in {"fit_face_from_image", "install_asset_pack", "equip_asset", "character_stylize"}:
+                from . import face_fit, human_assets
+
+                if cmd == "install_asset_pack":
+                    path = yield partial(
+                        human_assets.install_asset_pack, data.get("pack", "system"), face_fit.cache_dir()
+                    )
+                    return {"ok": True, "path": str(path)}
+                name = data.get("human") or data.get("object")
+                target = bpy.context.scene.objects[name] if name else bpy.context.active_object
+                if target is None:
+                    raise ValueError("Specify a character")
+                name, identity = target.name, (bpy.context.scene.session_uid, target.session_uid)
+                if cmd in {"fit_face_from_image", "equip_asset"}:
+                    face_fit.basemesh_services(target)
+                if cmd == "fit_face_from_image":
+                    ratios = yield partial(
+                        face_fit.measure_image, bpy.path.abspath(data["image_path"]), face_fit.cache_dir()
+                    )
+                else:
+                    packs = [data.get("pack", "system")] if cmd == "equip_asset" else human_assets.styling_packs(data)
+                    if packs:
+                        yield partial(human_assets.prepare_packs, packs, face_fit.cache_dir())
+                target = bpy.context.scene.objects.get(name)
+                if target is None or identity != (bpy.context.scene.session_uid, target.session_uid):
+                    raise ValueError("The selected character changed during preparation")
+                self._remember()
+                if cmd == "fit_face_from_image":
+                    return {"ok": True, **face_fit.apply_measurements(target, ratios)}
+                data = dict(data, object=name)
             if cmd == "generate_3d":
                 from . import ai_3d_provider as provider
+
                 scene_uid = bpy.context.scene.session_uid
-                path = yield partial(provider.download_model, data.get("prompt", ""),
-                                     bpy.path.abspath(data["image_path"]) if data.get("image_path") else None,
-                                     data.get("provider", "HUNYUAN3D-2"))
+                path = yield partial(
+                    provider.download_model,
+                    data.get("prompt", ""),
+                    bpy.path.abspath(data["image_path"]) if data.get("image_path") else None,
+                    data.get("provider", "HUNYUAN3D-2"),
+                    timeout=data.get("timeout", 900),
+                    texture=data.get("texture", False),
+                )
                 try:
                     if scene_uid != bpy.context.scene.session_uid:
                         raise ValueError("The active scene changed during generation")
                     self._remember()
-                    options = {k:v for k,v in data.items() if k not in {"cmd","provider","prompt","image_path"}}
+                    options = {
+                        k: v
+                        for k, v in data.items()
+                        if k not in {"cmd", "provider", "prompt", "image_path", "texture", "timeout"}
+                    }
                     return {"ok": True, **provider.import_model(path, **options)}
                 finally:
                     path.unlink(missing_ok=True)
@@ -408,7 +461,9 @@ class AiBridgeServer:
             return {"ok": True, **render_inspect(**{k: v for k, v in data.items() if k != "cmd"})}
 
         if cmd == "schema":
-            return {"ok": True, "schema": COMPACT_SCHEMA}
+            from .schema import TOPICS
+            topic = data.get("topic")
+            return {"ok": True, "schema": TOPICS[topic] if topic else COMPACT_SCHEMA}
 
         if cmd == "ping":
             return {
@@ -555,8 +610,8 @@ class AiBridgeServer:
 
         if cmd == "character_stylize":
             obj = bpy.data.objects.get(data.get("object", "")) or bpy.context.active_object
-            if isinstance(data.get("hair"), str) or any(k in data for k in (
-                    "clothes", "skin", "lip_tint", "iris_color", "iris_size", "lashes", "teeth", "hands", "expression")):
+            if ("hair" in data and data["hair"] is None) or isinstance(data.get("hair"), str) or any(k in data for k in (
+                    "clothes", "skin", "lip_tint", "eyes", "iris_color", "iris_size", "lashes", "teeth", "hands", "expression")):
                 return {"ok": True, **character_stylizer.style_character(obj, data)}
             objs = character_stylizer.stylize_portrait_character(
                 obj,
@@ -566,12 +621,6 @@ class AiBridgeServer:
             )
             return {"ok": True, "object": obj.name, "added": [o.name for o in objs]}
 
-        if cmd == "fit_face_from_image":
-            from .face_fit import fit_face_from_image
-            return {"ok": True, **fit_face_from_image(bpy.context.scene.objects[data["object"]], data["image_path"])}
-        if cmd == "install_asset_pack":
-            from .human_assets import install_asset_pack
-            return {"ok": True, "path": str(install_asset_pack(data.get("pack", "system")))}
         if cmd == "equip_asset":
             from .human_assets import equip_asset
             human = bpy.context.scene.objects[data.get("human") or data["object"]]
@@ -779,8 +828,8 @@ class AiBridgeServer:
             return {"ok": True, **result}
         return {"ok": False, "error": f"Unknown command: {cmd}"}
 
-    def _server_loop(self, sock):
-        while self.running and sock is self._socket:
+    def _server_loop(self, sock, requests, stopped):
+        while not stopped.is_set():
             try:
                 client, _ = sock.accept()
             except socket.timeout:
@@ -788,11 +837,14 @@ class AiBridgeServer:
             except OSError:
                 break
             with client:
-                client.settimeout(15)
+                client.settimeout(0.2)
                 chunks = []
-                while True:
+                deadline = time.monotonic() + 15
+                while not stopped.is_set() and time.monotonic() < deadline:
                     try:
                         chunk = client.recv(4096)
+                    except socket.timeout:
+                        continue
                     except OSError:
                         chunks.clear()
                         break
@@ -802,14 +854,15 @@ class AiBridgeServer:
                     if b"\n" in chunk:
                         break
                 payload = b"".join(chunks).decode("utf-8", errors="replace").strip()
-                if payload:
+                if payload and not stopped.is_set():
                     holder = {}
                     evt = threading.Event()
-                    self._queue.put((payload, holder, evt))
-                    if evt.wait(timeout=1200.0):
-                        reply = holder.get("resp", '{"ok":false,"error":"Empty"}')
-                    else:
-                        reply = '{"ok":false,"error":"Timeout"}'
+                    requests.put((payload, holder, evt))
+                    deadline = time.monotonic() + 1200
+                    while not evt.wait(0.1) and not stopped.is_set() and time.monotonic() < deadline:
+                        pass
+                    fallback = "Bridge stopped" if stopped.is_set() else "Timeout"
+                    reply = holder.get("resp") or _jdump({"ok": False, "error": fallback})
                     try:
                         client.sendall((reply + "\n").encode("utf-8"))
                     except OSError:

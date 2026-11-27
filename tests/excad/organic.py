@@ -128,6 +128,9 @@ with tempfile.TemporaryDirectory() as tmp:
     bpy.ops.export_scene.gltf(filepath=str(glb), use_selection=True, export_format="GLB")
     model = glb.read_bytes()
     calls = []
+    sessions = {}
+    inputs = [[], [1], [1, 2, 0, 3, 4, 5, 6, 7, 8], [0, 3, 4]]
+    functions = ["start_session", "preprocess_image", "image_to_3d", "extract_glb"]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -147,16 +150,26 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert not self.headers.get("Authorization")
                 return self.send(model)
             if self.path == "/config":
-                return self.send({"api_prefix": "/gradio_api"})
-            if self.path.startswith("/gradio_api/call/"):
-                name = self.path.split("/")[3]
+                return self.send(
+                    {
+                        "api_prefix": "/gradio_api",
+                        "dependencies": [
+                            {"id": i, "api_name": name, "inputs": inputs[i]} for i, name in enumerate(functions)
+                        ],
+                        "components": [{"id": i, "type": "state" if i == 0 else "value"} for i in range(9)],
+                    }
+                )
+            if self.path.startswith("/gradio_api/queue/data?session_hash="):
+                session = self.path.split("=")[-1]
+                name = functions[sessions[session]]
                 res = {
                     "start_session": [],
                     "preprocess_image": [{"path": "processed.png"}],
                     "image_to_3d": [{}],
                     "extract_glb": [{"url": base + "/result.glb"}],
                 }[name]
-                return self.send(("event: complete\ndata: " + json.dumps(res) + "\n\n").encode())
+                message = {"msg": "process_completed", "event_id": "event", "success": True, "output": {"data": res}}
+                return self.send(("data: " + json.dumps(message) + "\n\n").encode())
             if self.path.startswith("/tripo/"):
                 return self.send(
                     {"code": 0, "data": {"status": "success", "output": {"model_url": base + "/result.glb"}}}
@@ -167,12 +180,18 @@ with tempfile.TemporaryDirectory() as tmp:
             data = self.rfile.read(int(self.headers["Content-Length"]))
             calls.append(("POST", self.path))
             if self.path == "/generate":
-                assert json.loads(data)["type"] == "glb"
+                command = json.loads(data)
+                assert command["type"] == "glb" and command["texture"] == ("image" in command)
                 return self.send(model)
             if self.path.startswith("/gradio_api/"):
                 if self.path.endswith("upload"):
                     return self.send(["upload.png"])
-                assert json.loads(data)["session_hash"]
+                body = json.loads(data)
+                index = body["fn_index"]
+                key = body["session_hash"]
+                assert index == sessions.get(key, -1) + 1 and len(body["data"]) == len(inputs[index])
+                assert all(body["data"][j] is None for j, c in enumerate(inputs[index]) if c == 0)
+                sessions[key] = index
                 return self.send({"event_id": "event"})
             assert self.headers["Authorization"] == "Bearer fixture-token"
             if self.path == "/tripo/files":
@@ -209,14 +228,38 @@ with tempfile.TemporaryDirectory() as tmp:
                 image_path=str(directory / "face_00.png") if image else None,
                 height=0.65,
                 remesh=(i == 4),
+                texture=(i == 5),
                 rig=(i == 5),
                 name="Imported " + str(i),
             )
             assert res["objects"] and res["height"] == 0.65
-            obj = bpy.data.objects[res["name"]]
+            obj = bpy.data.objects[res["meshes"][0]]
             bpy.context.view_layer.update()
             bounds = [(obj.matrix_world @ v.co).z for v in obj.data.vertices]
             assert abs(min(bounds)) < 0.02 and abs(max(bounds) - 0.65) < 0.02, (provider, min(bounds), max(bounds))
+            if i == 5:
+                armature = obj.find_armature()
+                assert armature and armature.pose.bones["Root"]
+                assert all(v.groups for v in obj.data.vertices)
+                run("place_relative", obj=res["name"], relation="ALIGN_FLOOR", gap=0.2)
+                assert abs(providers._dimensions([obj])[0].z - 0.2) < 1e-5
+        # Several unparented imported parts must behave as one placement target.
+        for item in list(bpy.context.selected_objects):
+            item.select_set(False)
+        vase.select_set(True)
+        second = vase.copy()
+        bpy.context.collection.objects.link(second)
+        second.location = (2, 0, 0.45)
+        second.scale = (0.4, 0.4, 0.4)
+        second.select_set(True)
+        bundle = directory / "assembly.glb"
+        bpy.ops.export_scene.gltf(filepath=str(bundle), use_selection=True, export_format="GLB")
+        assembled = providers.import_model(bundle, name="Bundle", height=0.9, rig=True)
+        parts = [bpy.data.objects[n] for n in assembled["meshes"]]
+        assert len(parts) == 2 and len({p.find_armature() for p in parts}) == 1
+        assert abs(providers._dimensions(parts)[1].z - 0.9) < 1e-5
+        run("place_relative", obj=assembled["name"], relation="ALIGN_FLOOR", gap=0.17)
+        assert abs(providers._dimensions(parts)[0].z - 0.17) < 1e-5
         print("PROVIDER PROTOCOLS", len(calls), "real loopback HTTP requests", flush=True)
     finally:
         server.shutdown()
