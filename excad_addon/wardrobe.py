@@ -204,10 +204,56 @@ def _drape_hair(human, obj, mesh, style):
     key.value = 1
 
 
+def refit_fringe(human):
+    fringes = [o for o in bpy.context.scene.objects if o.get("excad_human") == human and o.get("excad_fringe")]
+    if not fringes:
+        return
+    with rest_mesh(human) as mesh:
+        surface = _body_surface(human, mesh)
+        left, right = _eye_centers(human, mesh)
+        eye, span = (left + right) / 2, (left - right).length
+        axis = eye + Vector((0, 0.7 * span, 0))
+        for obj in fringes:
+            to_head = human.matrix_world.inverted() @ obj.matrix_world
+            to_hair = to_head.to_3x3().inverted()
+            if not obj.data.shape_keys:
+                obj.shape_key_add(name="Basis")
+            key = obj.data.shape_keys.key_blocks.get("EXCAD fringe clearance")
+            if key:
+                key.value = 0
+            mixed = obj.shape_key_add(name="EXCAD fringe measurement", from_mix=True)
+            points = [to_head @ v.co for v in mixed.data]
+            obj.shape_key_remove(mixed)
+            key = key or obj.shape_key_add(name="EXCAD fringe clearance", from_mix=False)
+            basis = obj.data.shape_keys.reference_key
+            for i, point in enumerate(points):
+                key.data[i].co = basis.data[i].co
+                height = (point.z - eye.z) / span
+                outward = Vector((point.x - axis.x, point.y - axis.y, 0)).normalized()
+                if height > 0.85 or height < -2.0 or outward.y > 0:
+                    continue
+                # A lock can span an open mouth. Use the adjacent cheek/lip
+                # envelope so a strand cannot pass through the mouth to the teeth.
+                offset = 0.0
+                # Keep the curved fringe over the brow with room for the lashes.
+                gap = span * (0.04 + 0.18 * math.exp(-((height - 0.02) / 0.46) ** 2))
+                for dz in ((-0.09, 0, 0.09) if height < 0.35 else (0,)):
+                    start = point + outward * (4 * span) + Vector((0, 0, dz * span))
+                    hit = surface.ray_cast(start, -outward, 8 * span)[0]
+                    if hit is not None:
+                        offset = max(offset, (hit - point).dot(outward) + gap)
+                fade = min(1.0, (0.85 - height) / 0.4, (height + 2.0) / 0.35, -outward.y / 0.2)
+                key.data[i].co += to_hair @ (outward * (offset * fade))
+            key.value = 1
+
+
 def hair_style(human, style):
     obj = equip_asset(human, HAIR[style])
     head_weight(obj, human)
     result = [obj]
+    if style == "BOB":
+        obj["excad_fringe"] = True
+        refit_fringe(human)
     if style in {"LONG_WAVY", "LONG_STRAIGHT", "PONYTAIL", "CURTAIN_BANGS"}:
         with rest_mesh(human) as mesh:
             _drape_hair(human, obj, mesh, style)

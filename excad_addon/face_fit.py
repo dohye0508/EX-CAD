@@ -147,9 +147,10 @@ def set_targets(obj, values, channel):
             else:
                 created.append(targets.load_target(obj, str(paths[name]), weight=weight, name=name))
         human.refit(obj)
-        from .wardrobe import refit_eyes
+        from .wardrobe import refit_eyes, refit_fringe
 
         refit_eyes(obj)
+        refit_fringe(obj)
         obj["excad_character"] = True
         obj[channel] = json.dumps(values)
     except Exception:
