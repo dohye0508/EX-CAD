@@ -55,6 +55,9 @@ for name, value in fit["weights"].items():
 print("PHOTO FIT", fit, flush=True)
 for tone in ("FAIR_IVORY", "TAN", "DEEP", "WARM_BEIGE"):
     wear(skin=tone)
+shader = human.data.materials[0].node_tree.nodes["Principled BSDF"]
+assert shader.inputs["Subsurface Weight"].default_value > 0 and shader.inputs["Normal"].is_linked
+assert shader.inputs["Roughness"].is_linked
 lip_mask = [point.color[0] for point in human.data.color_attributes["EXCAD Lips"].data]
 assert max(lip_mask) > 0.25
 assert 0 < sum(weight > 0 for weight in lip_mask) < len(lip_mask) * 0.04
@@ -79,6 +82,8 @@ for style in ("SHORT", "PONYTAIL", "LONG_STRAIGHT", "LONG_WAVY", "CURTAIN_BANGS"
     for name in added:
         obj = bpy.data.objects[name]
         assert obj.data.polygons and obj.vertex_groups.get("head") and obj.find_armature(), name
+        shader = obj.data.materials[0].node_tree.nodes["Principled BSDF"]
+        assert shader.inputs["Tangent"].is_linked and shader.inputs["Anisotropic"].default_value > 0
     print("HAIR", style, flush=True)
     variant(style, ["TSHIRT", "PANTS", "SHOES"])
 for style in ("TSHIRT", "VNECK_SWEATER", "HOODIE", "JACKET", "PANTS", "SKIRT", "SHOES"):

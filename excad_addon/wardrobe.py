@@ -248,7 +248,10 @@ def refit_fringe(human):
 
 
 def hair_style(human, style):
+    from .portrait_materials import hair_fibers
+
     obj = equip_asset(human, HAIR[style])
+    hair_fibers(obj)
     head_weight(obj, human)
     result = [obj]
     if style == "BOB":
@@ -790,12 +793,15 @@ def garment(human, style):
 
 
 def skin(human, tone, lip_tint):
+    from .portrait_materials import skin_detail
+
     color = SKINS[tone]
     mat = _pbr_mat(f"{human.name} Portrait Skin", color, roughness=0.44)
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Subsurface Weight"].default_value = 0.16
     bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.43, 0.23)
     bsdf.inputs["Subsurface Scale"].default_value = 0.0032
+    skin_detail(human, mat)
     attr = human.data.color_attributes.get("EXCAD Lips")
     if attr is None or human.data.get("excad_lip_mask_version") != 1:
         if attr is None:

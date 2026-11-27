@@ -7,6 +7,58 @@ import numpy as np
 from mathutils.kdtree import KDTree
 
 
+def hair_fibers(obj):
+    for slot in obj.material_slots:
+        mat = slot.material
+        if not mat or not mat.use_nodes:
+            continue
+        if mat.users > 1:
+            slot.material = mat = mat.copy()
+        nodes = mat.node_tree.nodes
+        bsdf = nodes.get("Principled BSDF")
+        if bsdf is None or not obj.data.uv_layers.active:
+            continue
+        bsdf.inputs["Roughness"].default_value = 0.48
+        bsdf.inputs["Specular IOR Level"].default_value = 0.17
+        bsdf.inputs["Anisotropic"].default_value = 0.55
+        tangent = nodes.get("Hair direction") or nodes.new("ShaderNodeTangent")
+        tangent.name, tangent.direction_type = "Hair direction", "UV_MAP"
+        tangent.uv_map = obj.data.uv_layers.active.name
+        mat.node_tree.links.new(tangent.outputs["Tangent"], bsdf.inputs["Tangent"])
+
+
+def skin_detail(human, material):
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    bsdf = nodes.get("Principled BSDF")
+    tex = nodes.get("Skin coordinates") or nodes.new("ShaderNodeTexCoord")
+    tex.name = "Skin coordinates"
+    size = nodes.get("Skin texture scale") or nodes.new("ShaderNodeVectorMath")
+    size.name, size.operation = "Skin texture scale", "MULTIPLY"
+    # Generated coordinates follow the skin through poses. Restore their metric
+    # aspect so pores keep the same scale across the cheek, nose and forehead.
+    size.inputs[1].default_value = [
+        2 * abs(s * k) for s, k in zip(human.data.texspace_size, human.matrix_world.to_scale())
+    ]
+    noise = nodes.get("Skin pores") or nodes.new("ShaderNodeTexNoise")
+    noise.name = "Skin pores"
+    noise.inputs["Scale"].default_value = 1800
+    noise.inputs["Detail"].default_value = 1.6
+    noise.inputs["Roughness"].default_value = 0.55
+    bump = nodes.get("Skin relief") or nodes.new("ShaderNodeBump")
+    bump.name = "Skin relief"
+    bump.inputs["Strength"].default_value = 0.15
+    bump.inputs["Distance"].default_value = 0.00018
+    rough = nodes.get("Skin roughness") or nodes.new("ShaderNodeMapRange")
+    rough.name = "Skin roughness"
+    rough.inputs["To Min"].default_value, rough.inputs["To Max"].default_value = 0.38, 0.54
+    links.new(tex.outputs["Generated"], size.inputs[0])
+    links.new(size.outputs[0], noise.inputs["Vector"])
+    links.new(noise.outputs["Fac"], bump.inputs["Height"])
+    links.new(noise.outputs["Fac"], rough.inputs["Value"])
+    links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    links.new(rough.outputs["Result"], bsdf.inputs["Roughness"])
+
+
 def finish_fabric(obj, style, color, height, border_edges):
     mesh = obj.data
     samples = []
