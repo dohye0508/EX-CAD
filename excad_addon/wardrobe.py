@@ -439,8 +439,15 @@ def garment_clearance(human, garment):
         covered = []
         for i in body_ids:
             hit, n, _, distance = cover.find_nearest(points[i])
-            if hit is None or distance > height * 0.05 or skin.vertices[i].normal.dot(n) < 0.25:
+            if hit is None or distance > height * 0.05:
                 continue
+            normal = skin.vertices[i].normal
+            if normal.dot(n) < 0.25:
+                # At an armpit the opposite sleeve wall can be the nearest
+                # face. An outward ray finds the panel covering this skin.
+                hit, n, _, _ = cover.ray_cast(points[i], normal, height * 0.05)
+                if hit is None or normal.dot(n) < 0.25:
+                    continue
             if kd and kd.find(hit)[2] < max(height * 0.003, incident.get(i, 0) * 0.68):
                 continue
             covered.append(i)
