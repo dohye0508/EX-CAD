@@ -1180,6 +1180,7 @@ def reload_addon(server):
         "character_stylizer",
         "face_fit",
         "human_assets",
+        "hair_contact",
         "wardrobe",
         "oneshot_generators",
         "city_generator",

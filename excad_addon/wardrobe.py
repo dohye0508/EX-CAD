@@ -524,10 +524,16 @@ def _mask_under_jacket(jacket, shirt, span):
     from mathutils.kdtree import KDTree
 
     graph = bpy.context.evaluated_depsgraph_get()
-    outer = jacket.evaluated_get(graph)
-    inner = shirt.evaluated_get(graph)
-    jacket_mesh, shirt_mesh = outer.to_mesh(), inner.to_mesh()
+    # Calculate coverage on the fitted control cage. Subdivision and shell
+    # thickness add vertices which cannot be addressed by the source vertex group.
+    topology = [m for m in shirt.modifiers if m.type in {"SUBSURF", "SOLIDIFY", "MASK"} and m.show_viewport]
+    for modifier in topology:
+        modifier.show_viewport = False
+    bpy.context.view_layer.update()
+    outer, inner = jacket.evaluated_get(graph), shirt.evaluated_get(graph)
+    jacket_mesh = shirt_mesh = None
     try:
+        jacket_mesh, shirt_mesh = outer.to_mesh(), inner.to_mesh()
         if len(shirt_mesh.vertices) != len(shirt.data.vertices):
             return
         points = [outer.matrix_world @ v.co for v in jacket_mesh.vertices]
@@ -562,25 +568,44 @@ def _mask_under_jacket(jacket, shirt, span):
             hit, direction, _, _ = surface.ray_cast(point - normal * (0.01 * span), normal, 0.24 * span)
             if hit is not None and abs(normal.dot(direction)) > 0.25 and edges.find(hit)[2] > 0.045 * span:
                 hide.append(vertex.index)
+            elif shirt.get("excad_outer_fabric"):
+                # Both tailored pieces use the same body panels. At a concave
+                # armhole their normals can miss the enclosing jacket entirely.
+                near, _, _, _ = surface.find_nearest(point, 0.12 * span)
+                if near is not None and edges.find(near)[2] > 0.09 * span:
+                    hide.append(vertex.index)
     finally:
-        outer.to_mesh_clear()
-        inner.to_mesh_clear()
+        if jacket_mesh is not None:
+            outer.to_mesh_clear()
+        if shirt_mesh is not None:
+            inner.to_mesh_clear()
+        for modifier in topology:
+            modifier.show_viewport = True
+        bpy.context.view_layer.update()
     if hide:
         group = shirt.vertex_groups.new(name="EXCAD under jacket")
         group.add(hide, 1, "REPLACE")
         mod = shirt.modifiers.new(group.name, "MASK")
         mod.vertex_group = group.name
         mod.invert_vertex_group = True
+        # Subdivide the complete shirt first to preserve its shape at trimmed
+        # panels. Fabric thickness then closes the newly exposed hems.
+        shell = next((m for m in topology if m.type == "SOLIDIFY"), None)
+        if shell:
+            shirt.modifiers.move(shirt.modifiers.find(mod.name), shirt.modifiers.find(shell.name))
         shirt["excad_underlay_group"] = group.name
 
 
 def refit_layers(human, omit=()):
     """Fit outside garments and hanging hair to the final outfit in rest space."""
+    from . import hair_contact
     from .scene_mesh import read_surface
 
     pieces = [o for o in bpy.context.scene.objects if o.get("excad_human") == human and o not in omit]
     for piece in pieces:
         _remove_layer_mask(piece)
+        if piece.get("excad_draped_hair"):
+            hair_contact.clear(piece)
     if not any(o.get("excad_outer_fabric") or o.get("excad_draped_hair") for o in pieces):
         return
     with rest_mesh(human) as skin_mesh:
@@ -653,6 +678,9 @@ def refit_layers(human, omit=()):
             if hair or outer.get("excad_slot") == "outerwear":
                 _clear_layer_faces(human, outer, skin_mesh, key, points, surfaces, neck, span)
             key.value = 1
+            if hair:
+                fitted = [p + v.co - b.co for p, v, b in zip(points, key.data, basis.data)]
+                hair_contact.fit(outer, obstacles, fitted, to_human, neck, span)
             if outer.get("excad_slot") == "outerwear":
                 bpy.context.view_layer.update()
                 world_span = (to_world @ Vector((0, 0, span))).length

@@ -3,6 +3,8 @@
 
 import os
 from pathlib import Path
+import random
+import sys
 import tempfile
 
 import addon_utils
@@ -29,6 +31,47 @@ cases = [
     ("ATHLETIC_MALE", "default", "BOB", ["VNECK_SWEATER", "PANTS", "SHOES"], "DEEP", "SERIOUS", {}),
     ("ATHLETIC_FEMALE", "game_engine", "LONG_STRAIGHT", ["HOODIE", "SKIRT", "SHOES"], "FAIR_IVORY", "SMILE", {}),
 ]
+
+
+def seeded_case(seed):
+    rng = random.Random(seed)
+    top = rng.choice(
+        [
+            ["TSHIRT"],
+            ["VNECK_SWEATER"],
+            ["HOODIE"],
+            ["TSHIRT", "JACKET"],
+            ["VNECK_SWEATER", "JACKET"],
+        ]
+    )
+    clothes = [*top, rng.choice(["SKIRT", "PANTS"]), "SHOES"]
+    hair = rng.choice(["SHORT", "BOB", "PONYTAIL", "LONG_STRAIGHT", "LONG_WAVY", "CURTAIN_BANGS"])
+    rig = rng.choice(["default", "game_engine"])
+    body = {
+        key: rng.uniform(low, high)
+        for key, low, high in (
+            ("gender", 0.05, 0.95),
+            ("age", 0.30, 0.72),
+            ("height", 0.22, 0.85),
+            ("muscle", 0.16, 0.90),
+            ("weight", 0.18, 0.88),
+            ("proportions", 0.30, 0.78),
+        )
+    }
+    skin = rng.choice(["FAIR_IVORY", "TAN", "DEEP", "WARM_BEIGE"])
+    return (
+        "CUSTOM",
+        rig,
+        hair,
+        clothes,
+        skin,
+        rng.choice(["SMILE", "SERIOUS", "WINK", "SURPRISED"]),
+        body,
+    )
+
+
+if "--" in sys.argv:
+    cases = [seeded_case(int(seed)) for seed in sys.argv[sys.argv.index("--") + 1 :]]
 
 
 def run(cmd, **args):
@@ -94,11 +137,24 @@ with tempfile.TemporaryDirectory() as tmp:
         assert (wrist - shoulder).dot(up) > 0 and (wrist - shoulder).dot(outward) > 0
         if "JACKET" in clothes:
             shirt = next(o for o in bpy.context.scene.objects if o.get("excad_slot") == "top")
+            mask = next(
+                m for m in shirt.modifiers if m.type == "MASK" and m.vertex_group == shirt["excad_underlay_group"]
+            )
             covered = len(shirt.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.vertices)
-            assert 0 < covered < len(shirt.data.vertices)
+            mask.show_viewport = False
+            bpy.context.view_layer.update()
+            full = len(shirt.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.vertices)
+            assert 0 < covered < full
+            mask.show_viewport = True
+            bpy.context.view_layer.update()
+            digest = run("scene_digest")["h"]
+            run("checkpoint", name="Posed layers")
             run("character_stylize", object=obj.name, remove=["outerwear"])
             assert not shirt.get("excad_underlay_group")
-            assert len(shirt.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.vertices) > covered
+            assert len(shirt.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.vertices) == full
             assert not any(o.get("excad_slot") == "outerwear" for o in bpy.context.scene.objects)
+            run("rollback", name="Posed layers")
+            assert run("scene_digest", since_hash=digest).get("unchanged")
+            assert not run("render_inspect", target="Person", path=str(image_dir / "restored.png"))["warnings"]
         print("WARDROBE", preset, rig, flush=True)
     print("WARDROBE MOTION PASS", len(measured), "previews", max(measured), "max ms", flush=True)

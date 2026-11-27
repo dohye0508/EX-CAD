@@ -72,7 +72,7 @@ assert edited["ok"], edited
 
 헤어, 상의, 겉옷, 하의와 신발은 슬롯별로 교체한다. `clothes: []`는 의상을 벗기고, `lashes: false`는 속눈썹을 제거한다. `iris_size`만 바꾸면 현재 홍채 색이 유지된다. 애드온 패널의 **Install CC0 character assets** 버튼과 `{"cmd":"install_asset_pack","pack":"all"}`은 시스템·셔츠·바지·치마 팩을 내려받아 해시를 확인한다. `equip_asset`에 `human`, `name`, 필요 시 `pack`을 주면 장착과 리핏을 실행한다. `EXCAD_CACHE`로 다운로드와 텍스처 미리보기의 캐시 위치를 지정할 수 있다. [MakeHuman 공식 에셋 팩](https://static.makehumancommunity.org/assets/assetpacks.html)
 
-겉옷만 벗기려면 `{"cmd":"character_stylize","object":"Portrait","remove":["outerwear"]}`를 보낸다. 재킷 아래에 가려졌던 셔츠가 다시 드러난다.
+겉옷만 벗기려면 `{"cmd":"character_stylize","object":"Portrait","remove":["outerwear"]}`를 보낸다. 재킷 아래에 가려졌던 티셔츠나 스웨터가 다시 드러난다. 긴 머리는 머리 본을 따라 움직이며, 어깨를 올리면 Geometry Nodes가 현재 포즈의 옷 표면에 맞춰 머리끝을 조정한다.
 
 ## SDF, 다면 투영과 외부 3D 생성
 
@@ -129,6 +129,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/endurance.py -- 71127038
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/overlay.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py
+& $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003
 ```
 
 `overlay.py`는 GPU가 있는 머신에서 창을 열지 않고 실제 GPU 프레임 버퍼에 선과 치수를 그린다. `tests/excad/trellis_transport.py`는 TRELLIS의 Gradio 4.44.1 환경에서 일반 Python으로 실행한다. 이 테스트는 한 세션 안에서 이미지 업로드·전처리·3D 작업·GLB 추출까지 이어지는 전송 경로를 검사한다. 모델 추론에는 별도로 실행 중인 모델 서버나 서비스 계정이 필요하다.
