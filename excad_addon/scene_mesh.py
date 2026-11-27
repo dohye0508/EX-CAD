@@ -2,7 +2,7 @@
 """Evaluated world-space surfaces used by inspection and scene layout."""
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 
 import bpy
@@ -359,6 +359,54 @@ def _patch_center(first, second, normal, eps):
     return center if area > eps * eps else None
 
 
+def _footprint_faces(points, triangles, low, high):
+    for axis in range(2):
+        values = points[triangles, axis]
+        triangles = triangles[(values.max(axis=1) >= low[axis]) & (values.min(axis=1) <= high[axis])]
+    return triangles
+
+
+def _surface_over(surface, bounds, eps):
+    low, high = bounds[0, :2] - eps, bounds[1, :2] + eps
+    if np.all(surface.bounds[0, :2] >= low) and np.all(surface.bounds[1, :2] <= high):
+        return surface
+    faces = _footprint_faces(surface.points, surface.triangles, low, high)
+    if not len(faces):
+        return None
+    if len(faces) == len(surface.triangles):
+        return surface
+    used, indices = np.unique(faces, return_inverse=True)
+    points = surface.points[used]
+    return replace(
+        surface, points=points, triangles=indices.reshape(-1, 3), bounds=np.stack((points.min(0), points.max(0))),
+        _bvh=None,
+    )
+
+
+def _separated_along_z(upper, lower, eps):
+    # Only the overlapping footprint can support the other mesh. Peaks on a
+    # distant hillside would otherwise raise every ray and edge search.
+    upper, lower = _surface_over(upper, lower.bounds, eps), _surface_over(lower, upper.bounds, eps)
+    if upper is None or lower is None:
+        return True
+    lift = float(lower.bounds[1, 2] - upper.bounds[0, 2])
+    clearance = vertical_clearance(upper, lower, (0, 0, lift), best=lift + 2 * eps)
+    return clearance >= lift - eps
+
+
+def _touches_sheet(sheet, solid, face_ids, eps):
+    triangles = sheet.points[sheet.triangles[np.unique(face_ids)]]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    axis = int(np.argmax(np.abs(normals).sum(axis=0)))
+    contact = triangles[:, :, axis].mean()
+    if axis != 2:
+        axes = ((1, 2, 0), (2, 0, 1))[axis]
+        sheet = replace(sheet, points=sheet.points[:, axes], bounds=sheet.bounds[:, axes], _bvh=None)
+        solid = replace(solid, points=solid.points[:, axes], bounds=solid.bounds[:, axes], _bvh=None)
+    upper, lower = (solid, sheet) if solid.bounds[:, 2].mean() >= contact else (sheet, solid)
+    return _separated_along_z(upper, lower, eps)
+
+
 def overlap_kind(a, b, epsilon=1e-5):
     scale = max(float(np.abs(a.bounds).max()), float(np.abs(b.bounds).max()))
     epsilon = max(epsilon, scale * np.finfo(np.float32).eps * 2)
@@ -366,13 +414,17 @@ def overlap_kind(a, b, epsilon=1e-5):
     if np.min(depth) < -epsilon or (a.closed and b.closed and np.min(depth) <= epsilon):
         return None
     pairs = a.bvh.overlap(b.bvh)
+    if pairs and a.closed != b.closed:
+        # A mesh with an intentional boundary, such as a terrain surface, can
+        # touch a closed sole or bracket without cutting into it.
+        sheet, solid, column = (b, a, 1) if a.closed else (a, b, 0)
+        if _touches_sheet(sheet, solid, np.asarray(pairs)[:, column], epsilon):
+            return None
     if pairs and a.closed and b.closed and depth[2] < 0.1 * min(np.ptp(a.bounds[:, 2]), np.ptp(b.bounds[:, 2])):
         # At grazing support, BVH can report a short line crossing at the rim
         # although the solids only meet. Check the actual vertical separation.
         upper, lower = (a, b) if a.bounds[0, 2] > b.bounds[0, 2] else (b, a)
-        lift = float(lower.bounds[1, 2] - upper.bounds[0, 2])
-        clearance = vertical_clearance(upper, lower, (0, 0, lift), best=lift + 2 * epsilon)
-        if clearance >= lift - epsilon:
+        if _separated_along_z(upper, lower, epsilon):
             return None
     if pairs and _crosses(a, b, pairs, epsilon):
         return "crossing"
@@ -417,11 +469,12 @@ def _project_edges(surface, shift, limit, bottom, low_xy, high_xy):
     # A small object on a large terrain can share a height with thousands of
     # remote edges. Only triangles inside the shared footprint can touch.
     low, high = low_xy - shift[:2], high_xy - shift[:2]
-    for axis in range(2):
-        values = surface.points[tri, axis]
-        tri = tri[(values.max(axis=1) >= low[axis]) & (values.min(axis=1) <= high[axis])]
+    tri = _footprint_faces(surface.points, tri, low, high)
     edges = np.concatenate((tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]))
-    pairs = np.unique(np.sort(edges, axis=1), axis=0)
+    start, end = edges.min(axis=1).astype(np.int64), edges.max(axis=1)
+    count = len(surface.points)
+    keys = np.unique(start * count + end)
+    pairs = np.column_stack((keys // count, keys % count))
     return surface.points[pairs] + shift
 
 

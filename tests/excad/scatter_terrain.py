@@ -83,6 +83,12 @@ for aligned in (True, False):
         assert abs(clearance - lift) < 2e-5, (name, clearance - lift)
     result = run("render_inspect")
     assert not result["warnings"], result["warnings"]
+    sheet = make_mesh("Hillside surface", terrain[:base], top[: (side - 1) ** 2])
+    sheet.matrix_world = land.matrix_world
+    assert not run("check_intersections", objects=[sheet.name, *names])["intersections"]
+    bpy.data.objects[names[0]].location.z -= 0.03
+    assert run("check_intersections", objects=[sheet.name, names[0]])["intersections"]
+    bpy.data.objects.remove(sheet, do_unlink=True)
     for name in names:
         bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True)
 
@@ -105,6 +111,15 @@ names = run(
 )["objects"]
 bottoms = {round(float(s.bounds[0, 2]), 4) for s in scene_mesh.surfaces() if s.obj.name in names}
 assert bottoms == {0.2, 0.4}, bottoms
+
+# Both sides of a vertical sheet can support a bracket. Cutting through
+# the sheet should still register on either side.
+wall = make_mesh("Vertical sheet", [(0, -1, -1), (0, 1, -1), (0, 1, 1), (0, -1, 1)], [(0, 1, 2, 3)])
+tile.scale = (0.2, 0.3, 0.3)
+for side_sign in (-1, 1):
+    for distance, crossing in ((0.1, False), (0.099, True)):
+        tile.location = (side_sign * distance, 0, 0)
+        assert bool(run("check_intersections", objects=[wall.name, tile.name])["intersections"]) == crossing
 before = set(bpy.data.objects)
 bad = AiBridgeServer.instance()._dispatch_dict(
     dict(cmd="scatter_on_surface", asset=tile.name, surface_obj=land.name, count=1, max_slope=-5)
