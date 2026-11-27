@@ -125,6 +125,8 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 
 받침대 위에 놓인 부품 하나를 지정하면 이미지에는 지정한 부품이 나오고, 부유 검사는 실제 받침대까지 확인한다. `set_material`로 바꾼 광택과 금속성, `light_studio`의 세 조명도 프리뷰에 반영된다. 기본 `scene_digest`에서 생성한 조명과 정사영 카메라의 변경을 추적할 수 있다.
 
+같은 메시를 여러 번 배치하면 프리뷰가 각 인스턴스의 변환·재질을 적용하고 삼각형 검색 구조를 공유한다. Windows의 Blender 5.2.1에서 받침대와 색상이 다른 타원체 196개(삼각형 약 78만 개)를 검사한 두 번의 측정은 377 ms와 384 ms였다. 두 번 모두 겹친 한 쌍과 떠 있는 한 물체를 찾았다.
+
 `checkpoint`에 이름을 주고 편집한 뒤 `rollback`에 같은 이름을 보내면 활성 장면이 복원된다. `undo`는 최근 브리지 편집을 한 요청 단위로 되돌린다. 여러 단계가 있는 배치는 처음 실패한 단계에서 중지되며 그 전에 성공한 편집은 유지된다. 전체 배치를 되돌리려면 `undo`를 사용한다.
 
 ## Blender 백그라운드 검증
@@ -135,7 +137,7 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 cmd /c install_blender_addon.bat
 $blenderExe = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
 $env:EXCAD_TEST_VARIANTS = Join-Path $env:TEMP 'excad-character-variants'
-foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view_capture', 'import_rig', 'layout', 'dense_layout') {
+foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view_capture', 'import_rig', 'layout', 'dense_layout', 'linked_inspection') {
     & $blenderExe -b --factory-startup --python-exit-code 1 --python "tests/excad/$suite.py"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

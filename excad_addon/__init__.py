@@ -1189,6 +1189,7 @@ def reload_addon(server):
         "city_generator",
         "image_colors",
         "inspect_shading",
+        "inspect_rays",
         "scene_mesh",
         "humanoid_skin",
         "inspection",

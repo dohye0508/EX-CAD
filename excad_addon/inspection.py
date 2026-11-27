@@ -10,9 +10,9 @@ import zlib
 import bpy
 import numpy as np
 from mathutils import Vector
-from mathutils.bvhtree import BVHTree
 
 from . import scene_mesh
+from .inspect_rays import PreviewRays
 from .inspect_shading import Shading
 from .image_colors import linear_to_srgb
 
@@ -86,7 +86,7 @@ def _illuminate(points, normals, colors, finish, eye, key, studio):
     return result
 
 
-def _tile(tree, bounds, shading, view, size, studio):
+def _tile(rays, bounds, shading, view, size, studio):
     eye = Vector(DIRECTIONS[view]).normalized()
     right = Vector((1, 0, 0)) if view == "TOP" else Vector((0, 0, 1)).cross(eye).normalized()
     up = eye.cross(right)
@@ -98,17 +98,8 @@ def _tile(tree, bounds, shading, view, size, studio):
     start = center + (up * (size - 1 + top - bottom) - right * (size - 1)) * (step / 2)
     rows = start, -up * step, right * step
     light = (eye * 0.8 + up * 0.9 - right * 0.55).normalized()
-    ids = np.full((size, size), -1, dtype=np.int32)
-    positions = np.zeros((size, size, 3), dtype=np.float32)
     ray = -eye
-    for y in range(size):
-        p = rows[0] + y * rows[1]
-        for x in range(size):
-            position, _, index, _ = tree.ray_cast(p, ray)
-            if index is not None:
-                ids[y, x] = index
-                positions[y, x] = position
-            p += rows[2]
+    ids, positions = rays.grid(rows, ray, size)
     rgb = np.empty((size, size, 3), np.uint8)
     bg = np.linspace((239, 244, 248), (216, 225, 233), size)
     rgb[:] = bg[:, None]
@@ -132,7 +123,7 @@ def _tile(tree, bounds, shading, view, size, studio):
         # See the face behind transparent hair and eyelash cards.
         for j, i in zip(y, x):
             p = Vector(positions[j, i]) + ray * (step * 0.001)
-            hit, _, index, _ = tree.ray_cast(p, ray)
+            hit, index = rays.behind(p, ray, i, j)
             ids[j, i] = -1 if index is None else index
             if hit is not None:
                 positions[j, i] = hit
@@ -327,16 +318,12 @@ def render_inspect(target="ALL", views=("FRONT", "SIDE", "ISO", "TOP"), path=Non
         raise ValueError("No visible geometry to inspect")
     bounds = _group_box(items)
     shading = Shading(items)
-    tree = (
-        items[0].bvh
-        if len(items) == 1
-        else BVHTree.FromPolygons(shading.points.tolist(), shading.triangles.tolist(), all_triangles=True)
-    )
+    rays = PreviewRays(items, shading)
     studio = _studio_lights()
     grid = np.full((size * 2 + 2, size * 2 + 2, 3), 255, np.uint8)
     for i, view in enumerate(views):
         y, x = (i // 2) * (size + 2), (i % 2) * (size + 2)
-        grid[y : y + size, x : x + size] = _tile(tree, bounds, shading, view, size, studio)
+        grid[y : y + size, x : x + size] = _tile(rays, bounds, shading, view, size, studio)
     warnings, contacts, topology = _diagnostics(items, targeted=target != "ALL")
     dest = Path(bpy.path.abspath(path)).resolve() if path else None
     directory = dest.parent if dest else Path(tempfile.gettempdir())

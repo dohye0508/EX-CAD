@@ -22,6 +22,8 @@ class Surface:
     nonmanifold_edges: int
     shading: object = None
     boundary_vertices: object = None
+    local_points: object = None
+    matrix: object = None
     _bvh: object = None
     _samples: object = None
     _hem: object = None
@@ -197,6 +199,8 @@ def read_surface(obj, graph, shading=False, cache=None):
             geometry.nonmanifold_edges,
             detail,
             boundary,
+            geometry.coords if shading else None,
+            evaluated.matrix_world.copy() if shading else None,
         )
 
 

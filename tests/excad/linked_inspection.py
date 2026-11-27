@@ -22,7 +22,10 @@ glazes = []
 for name, tint in (("Jade", (0.1, 0.45, 0.23)), ("Clay", (0.58, 0.14, 0.06))):
     mat = bpy.data.materials.new(name)
     mat.diffuse_color = (*tint, 1)
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*tint, 1)
+    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
+        *tint,
+        1,
+    )
     glazes.append(mat)
 source.data.materials.append(glazes[0])
 pots = []
@@ -59,13 +62,37 @@ def pixels(path):
         bpy.data.images.remove(image)
 
 
+def cutout(material):
+    image = bpy.data.images.new(
+        "Perforated ceramic", 16, 16, alpha=True, float_buffer=True
+    )
+    rgba = np.ones((16, 16, 4), np.float32)
+    rgba[:, :, :3] = material.diffuse_color[:3]
+    rgba[:, :, 3] = np.indices((16, 16)).sum(axis=0) % 8 >= 4
+    image.pixels.foreach_set(rgba.ravel())
+    image.update()
+    tree = material.node_tree
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = image
+    tree.links.new(
+        texture.outputs["Color"], tree.nodes["Principled BSDF"].inputs["Base Color"]
+    )
+
+
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "planters.png"
     before = render_inspect(path=str(path))
     reference = pixels(path)
-    assert [(w["kind"], w.get("objects", w.get("object"))) for w in before["warnings"]] == [
-        ("overlap", [pots[-2].name, pots[-1].name]), ("above_floor", pots[1].name)
-    ], before["warnings"]
+    assert [
+        (w["kind"], w.get("objects", w.get("object"))) for w in before["warnings"]
+    ] == [("overlap", [pots[-2].name, pots[-1].name]), ("above_floor", pots[1].name)], (
+        before["warnings"]
+    )
+
+    cutout(glazes[0])
+    render_inspect(path=str(path))
+    perforated = pixels(path)
+    assert np.count_nonzero(np.max(np.abs(reference - perforated), axis=1) > 0.04) > 250
 
     # Edits after a query must invalidate both the preview and its world bounds.
     for vert in source.data.vertices:
@@ -73,13 +100,27 @@ with tempfile.TemporaryDirectory() as tmp:
     source.data.update()
     edited = render_inspect(path=str(path))
     expected = pixels(path)
-    assert edited["bbox"] != before["bbox"] and np.count_nonzero(np.abs(reference - expected) > 0.05) > 100
+    assert (
+        edited["bbox"] != before["bbox"]
+        and np.count_nonzero(np.abs(perforated - expected) > 0.05) > 100
+    )
 
     # Baking each mesh into a private datablock should produce the same picture.
     for pot in pots[1:]:
         pot.data = pot.data.copy()
     independent = render_inspect(path=str(path))
-    assert independent["bbox"] == edited["bbox"] and independent["warnings"] == edited["warnings"]
+    assert (
+        independent["bbox"] == edited["bbox"]
+        and independent["warnings"] == edited["warnings"]
+    )
     error = np.max(np.abs(expected - pixels(path)), axis=1)
-    assert np.count_nonzero(error > 0.02) <= 8, (np.count_nonzero(error > 0.02), error.max())
-print("LINKED INSPECTION PASS", bpy.app.version_string, before["elapsed_ms"], edited["elapsed_ms"])
+    assert np.count_nonzero(error > 0.02) <= 8, (
+        np.count_nonzero(error > 0.02),
+        error.max(),
+    )
+print(
+    "LINKED INSPECTION PASS",
+    bpy.app.version_string,
+    before["elapsed_ms"],
+    edited["elapsed_ms"],
+)
