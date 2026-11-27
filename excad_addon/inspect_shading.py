@@ -2,6 +2,7 @@
 """Compact material/normal samples for diagnostic ray casts in the headless inspector."""
 
 from collections import OrderedDict
+from functools import lru_cache
 import hashlib
 import os
 from pathlib import Path
@@ -62,11 +63,17 @@ def _texture_node(mat):
     return max(images, key=lambda x: x[0])[1] if images else None
 
 
-def _thumbnail_file(path, revision, colorspace, alpha_mode):
+@lru_cache(maxsize=128)
+def _file_digest(path, revision):
+    # Size and modification time invalidate this digest when a file is replaced.
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").digest()
+
+
+def _thumbnail_file(identity):
     root = os.getenv("EXCAD_CACHE") or bpy.utils.user_resource("DATAFILES", path="excad")
-    identity = (os.path.normcase(str(path.resolve())), revision, colorspace, alpha_mode)
     name = hashlib.sha256(repr(identity).encode("utf8")).hexdigest()
-    return Path(root) / "thumbnails-v1" / (name + ".npy")
+    return Path(root) / "thumbnails-v2" / (name + ".npy")
 
 
 def _store_thumbnail(path, pixels):
@@ -89,22 +96,29 @@ def thumbnail(image, persist=False):
         return None
     colorspace = image.colorspace_settings.name
     path = None
-    revision = None
+    digest = packed = None
     can_read_file = image.source == "FILE" and not image.is_dirty
-    if can_read_file and image.filepath and not image.packed_file:
+    if can_read_file and image.packed_file:
+        packed = image.packed_file.data
+        digest = hashlib.sha256(packed).digest()
+    elif can_read_file and image.filepath:
         path = Path(bpy.path.abspath(image.filepath, library=image.library))
         try:
             stat = path.stat()
-            revision = stat.st_size, stat.st_mtime_ns
+            digest = _file_digest(path, (stat.st_size, stat.st_mtime_ns))
         except OSError:
             path = None
-    key = image.session_uid, image.filepath, revision, colorspace, image.alpha_mode
+    # A packed .blend, its undo snapshot and the original image file share a
+    # thumbnail only when the encoded pixels and their interpretation match.
+    key = (digest or (image.session_uid, image.filepath)), colorspace, image.alpha_mode
+    cached = _thumbnail_file(key) if digest else None
     if not image.is_dirty and key in _thumbnails:
         _thumbnails.move_to_end(key)
+        if persist and cached and not cached.is_file():
+            _store_thumbnail(cached, _thumbnails[key])
         return _thumbnails[key]
 
     pixels = None
-    cached = _thumbnail_file(path, revision, colorspace, image.alpha_mode) if path else None
     if cached and cached.is_file():
         try:
             array = np.load(cached, allow_pickle=False, mmap_mode="r")
@@ -113,14 +127,14 @@ def thumbnail(image, persist=False):
         except (OSError, ValueError, EOFError):
             pass
     restored = pixels is not None
-    if pixels is None and can_read_file and (path or image.packed_file) and colorspace in {"sRGB", "Non-Color"}:
+    if pixels is None and (path or packed) and colorspace in {"sRGB", "Non-Color"}:
         # Access a thumbnail directly, without decoding a second copy into Blender's
         # image database. Packed and external images use Blender's own file decoder.
         import imbuf
 
         buffer = None
         try:
-            buffer = imbuf.load(str(path)) if path else imbuf.load_from_buffer(image.packed_file.data)
+            buffer = imbuf.load(str(path)) if path else imbuf.load_from_buffer(packed)
             w, h = buffer.size
             if buffer.buffer_type == "BYTE" and buffer.channels == 4:
                 if max(w, h) > 384:
@@ -151,7 +165,7 @@ def thumbnail(image, persist=False):
         _thumbnails[key] = pixels
         if len(_thumbnails) > 24:
             _thumbnails.popitem(last=False)
-        if persist and cached and not restored:
+        if (persist or packed is not None) and cached and not restored:
             _store_thumbnail(cached, pixels)
     return pixels
 

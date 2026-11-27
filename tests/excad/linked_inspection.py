@@ -3,10 +3,12 @@
 
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import bpy
 import numpy as np
 
+from excad_addon import inspect_shading
 from excad_addon.inspection import render_inspect
 from excad_addon.scene_layout import place_relative
 from excad_addon.scene_mesh import surfaces
@@ -79,8 +81,36 @@ def cutout(material):
     )
 
 
+def check_packed_texture(root):
+    images = []
+    for name, rgb in (("red", (0.8, 0.1, 0.1)), ("green", (0.1, 0.8, 0.1))):
+        path = root / (name + ".png")
+        color = bpy.data.images.new(name, width=8, height=8)
+        color.pixels.foreach_set(np.tile((*rgb, 1.0), 64).astype(np.float32))
+        color.filepath_raw, color.file_format = str(path), "PNG"
+        color.save()
+        bpy.data.images.remove(color)
+        images.append(path)
+    loaded = bpy.data.images.load(str(images[0]), check_existing=False)
+    try:
+        reference = inspect_shading.thumbnail(loaded, persist=True).copy()
+        loaded.pack()
+        inspect_shading._thumbnails.clear()
+        with patch("imbuf.load_from_buffer", side_effect=AssertionError("Redecoded the same packed texture")):
+            assert np.allclose(inspect_shading.thumbnail(loaded), reference, atol=0.001)
+        # Keep the same image ID, filename, and colorspace while replacing its packed bytes.
+        updated = images[1].read_bytes()
+        loaded.pack(data=updated, data_len=len(updated))
+        current = inspect_shading.thumbnail(loaded)
+        assert current[0, 0, 1] > current[0, 0, 0] and reference[0, 0, 0] > reference[0, 0, 1]
+    finally:
+        bpy.data.images.remove(loaded)
+
+
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "planters.png"
+    with patch.dict("os.environ", EXCAD_CACHE=tmp):
+        check_packed_texture(Path(tmp))
     before = render_inspect(path=str(path))
     reference = pixels(path)
     assert [
