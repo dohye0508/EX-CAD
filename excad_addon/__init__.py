@@ -1196,6 +1196,7 @@ def reload_addon(server):
         "uv_bake",
         "sdf_engine",
         "ai_3d_provider",
+        "scatter_support",
         "scene_layout",
         "appearance",
         "scene_history",

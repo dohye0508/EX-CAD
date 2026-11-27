@@ -120,22 +120,34 @@ def _duplicate(asset):
         raise
 
 
-def scatter_on_surface(asset, surface_obj, count, min_dist=0.1, align_normal=True, seed=0):
+def scatter_on_surface(asset, surface_obj, count, min_dist=0.1, align_normal=True, seed=0, max_slope=None):
+    from .scatter_support import ScatterAsset
+
     scene = bpy.context.scene
     source, surface = scene.objects[asset], scene.objects[surface_obj]
     if source.get("excad_character"):
         source = source.find_armature() or source
-    if count < 1 or count > 10000 or min_dist < 0:
+    if count < 1 or count > 10000 or not math.isfinite(min_dist) or min_dist < 0:
         raise ValueError("Choose 1..10000 instances and nonnegative spacing")
+    if max_slope is not None and not 0 <= max_slope <= 180:
+        raise ValueError("max_slope must be an angle from 0 to 180 degrees above horizontal")
     items = _items(surface)
+    ends = np.cumsum([len(s.triangles) for s in items])
     triangles = np.concatenate([s.points[s.triangles] for s in items])
     cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    graph = bpy.context.evaluated_depsgraph_get()
+    for start, end, part in zip([0, *ends[:-1]], ends, items):
+        if part.obj.evaluated_get(graph).matrix_world.to_3x3().determinant() < 0:
+            cross[start:end] *= -1
     areas = np.linalg.norm(cross, axis=1)
+    if max_slope is not None:
+        areas[cross[:, 2] < areas * (math.cos(math.radians(max_slope)) - 1e-7)] = 0
     if areas.sum() <= 0:
-        raise ValueError("Surface is degenerate")
+        raise ValueError("The surface has no usable triangles for this slope")
     probability = areas / areas.sum(dtype=np.float64)
     rng = np.random.default_rng(seed)
     cell = max(min_dist, 1e-6)
+    shape = ScatterAsset(source, _items(source))
     lookup, placements = {}, []
     for _ in range(24):
         sample_count = max(32, (count - len(placements)) * 8)
@@ -152,29 +164,25 @@ def scatter_on_surface(asset, surface_obj, count, min_dist=0.1, align_normal=Tru
             )
             if any(np.dot(point - q, point - q) < min_dist**2 for q in nearby):
                 continue
+            part = int(np.searchsorted(ends, fi, side="right"))
+            face = fi - (ends[part - 1] if part else 0)
+            matrix = shape.placement(items[part], face, point, cross[fi] / areas[fi], align_normal)
+            if matrix is None:
+                continue
             lookup.setdefault(key, []).append(point)
-            placements.append((point, cross[fi] / areas[fi]))
+            placements.append(matrix)
             if len(placements) == count:
                 break
         if len(placements) == count:
             break
     if len(placements) < count:
         raise ValueError("Surface cannot accommodate the requested count and minimum distance")
-    cloud = np.concatenate([s.points for s in _items(source)])
-    origin, rotation, scale = source.matrix_world.decompose()
-    up = rotation @ Vector((0, 0, 1))
     copies = []
     try:
-        for point, normal in placements:
-            n = Vector(normal)
-            rotation_delta = up.rotation_difference(n) if align_normal else Matrix.Identity(3).to_quaternion()
-            verts = (cloud - np.array(origin)) @ np.array(rotation_delta.to_matrix()).T
-            # Project the center of the footprint onto the sampled surface.
-            center = (verts.min(0) + verts.max(0)) / 2
-            anchor = center + normal * (float(np.min(verts @ normal)) - float(center @ normal))
+        for matrix in placements:
             copy = _duplicate(source)
             copies.append(copy)
-            copy.matrix_world = Matrix.LocRotScale(Vector(point - anchor), rotation_delta @ rotation, scale)
+            copy.matrix_world = matrix
         bpy.context.view_layer.update()
     except Exception:
         for root in copies:

@@ -121,6 +121,8 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 
 `place_relative`는 이름으로 지지물과 이동 대상을 지정한다. `ON_TOP_OF`는 양쪽의 실제 표면을 기준으로 수직 간격을 맞춘다. `scatter_on_surface`는 면적 비례 샘플링을 사용하며 `seed`로 같은 배치를 재현할 수 있다. `resolve_overlaps`의 `fixed`에 움직이면 안 되는 물체를 넣는다. 부모 아래의 부품은 기본적으로 한 조립체로 이동한다.
 
+굴곡이 있는 지형에 물체를 흩뿌릴 때 `scatter_on_surface`는 각 사본의 밑면과 지형이 실제로 닿는 위치를 구한다. `max_slope: 40`을 지정하면 월드 위쪽을 기준으로 경사 40도 이하인 면만 사용한다. 닫힌 지형의 밑면과 옆면을 제외하고 소품을 세울 때 쓸 수 있다. `align_normal: false`를 함께 주면 각 사본이 원래 자세를 유지한다.
+
 `render_inspect`는 평가된 메시로 정면·측면·사선·상단을 그린다. `warnings`에 겹침, 부유, 비정상적으로 얇은 형상, 열린 솔리드가 표시된다. 인물의 장착 부위와 옷 끝단의 접촉은 `contacts`, 헤어 카드와 의복의 열린 경계 수는 `surface_topology`에서 확인할 수 있다. 기본 타일은 160 × 160이며 모델 복잡도와 타일 크기에 따라 처리 시간이 달라진다.
 
 받침대 위에 놓인 부품 하나를 지정하면 이미지에는 지정한 부품이 나오고, 부유 검사는 실제 받침대까지 확인한다. `set_material`로 바꾼 광택과 금속성, `light_studio`의 세 조명도 프리뷰에 반영된다. 기본 `scene_digest`에서 생성한 조명과 정사영 카메라의 변경을 추적할 수 있다.
@@ -137,7 +139,7 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 cmd /c install_blender_addon.bat
 $blenderExe = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
 $env:EXCAD_TEST_VARIANTS = Join-Path $env:TEMP 'excad-character-variants'
-foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view_capture', 'import_rig', 'layout', 'dense_layout', 'linked_inspection') {
+foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view_capture', 'import_rig', 'layout', 'dense_layout', 'linked_inspection', 'scatter_terrain') {
     & $blenderExe -b --factory-startup --python-exit-code 1 --python "tests/excad/$suite.py"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
