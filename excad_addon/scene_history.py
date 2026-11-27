@@ -32,6 +32,24 @@ DATA = (
 )
 
 
+def _dependencies():
+    graph = {}
+    for block, users in bpy.data.user_map().items():
+        for user in users:
+            graph.setdefault(user, set()).add(block)
+    return graph
+
+
+def _reachable(roots, graph, excluded=()):
+    result, excluded = set(roots), set(excluded)
+    queue = list(result)
+    while queue:
+        additional = graph.get(queue.pop(), set()) - result - excluded
+        result.update(additional)
+        queue.extend(additional)
+    return result
+
+
 class SceneHistory:
     def __init__(self):
         self.storage = tempfile.TemporaryDirectory(prefix="excad-history-")
@@ -125,27 +143,12 @@ class SceneHistory:
         shared.update(c for scene in other_scenes for c in scene.collection.children_recursive)
         old_objects = set(current.objects) - shared
         old_collections = set(current.collection.children_recursive) - shared
-        users = bpy.data.user_map()
-        owners = {current, *old_objects, *old_collections}
-        # Only remove data previously reachable from this scene which loses its last user.
-        dependencies = {}
-        for dep, refs in users.items():
-            for ref in refs:
-                dependencies.setdefault(ref, set()).add(dep)
+        dependencies = _dependencies()
         external = set(other_scenes)
-        queue = list(owners)
-        while queue:
-            additional = dependencies.get(queue.pop(), set()) - owners - external
-            owners.update(additional)
-            queue.extend(additional)
+        owners = _reachable({current, *old_objects, *old_collections}, dependencies, external)
         # References from other scenes (including modifier and collection instances)
         # must survive a restore even when their objects are not linked there directly.
-        queue = list(other_scenes)
-        protected = set(queue)
-        while queue:
-            additional = dependencies.get(queue.pop(), set()) - protected
-            protected.update(additional)
-            queue.extend(additional)
+        protected = _reachable(other_scenes, dependencies)
         old_objects -= protected
         old_collections -= protected
         disposable = {
@@ -166,13 +169,25 @@ class SceneHistory:
                     requested[key] = names
                     setattr(dest, key, names.copy())
         restored = dest.scenes[requested["scenes"].index(root_name)]
+        captured = _reachable(
+            {restored, *restored.objects, *restored.collection.children_recursive},
+            _dependencies(),
+            set(bpy.data.scenes) - {restored},
+        )
         # An object linked into two scenes represents one edit. Restore the shared
         # datablock for all its users, retaining links and names across subsequent undo.
         replacements, discard = {}, set()
         external_copies, external_data = [], set()
         for key, names in requested.items():
             for name, block in zip(names, getattr(dest, key)):
-                old = existing.get(identities.get((key, name)))
+                previous_uid = identities.get((key, name))
+                old = existing.get(previous_uid)
+                # Removing a part can orphan its mesh, finishes or images before
+                # rollback. Release exactly the captured originals when unused,
+                # and track their replacements for repeated restores.
+                if previous_uid and old is None and block in captured and not block.library:
+                    disposable.add(previous_uid)
+                    replacements[previous_uid] = block.session_uid
                 if old is None or not block or block == old or block.library:
                     continue
                 if old in external:

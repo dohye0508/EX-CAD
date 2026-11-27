@@ -173,6 +173,27 @@ assert bpy.context.scene["reference_scene"] == reference
 assert len([o for o in bpy.data.objects if o.name.startswith("Reference marker")]) == 1
 check = run("scene_digest", since_hash=initial["h"])
 assert check.get("unchanged"), check
+# Removing a part leaves its mesh and finish in the file with no scene users.
+# Two consecutive restores must reclaim the original names without purging other assets.
+mesh = bpy.data.meshes.new("Insert mesh")
+mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+mesh.materials.append(bpy.data.materials.new("Insert paint"))
+insert = bpy.data.objects.new("Painted insert", mesh)
+bpy.context.collection.objects.link(insert)
+orphan = bpy.data.materials.new("Independent unused paint")
+painted = run("scene_digest")["h"]
+run("checkpoint", name="Painted insert")
+for _ in range(2):
+    bpy.data.objects.remove(bpy.context.scene.objects["Painted insert"], do_unlink=True)
+    run("rollback", name="Painted insert")
+    insert = bpy.context.scene.objects["Painted insert"]
+    assert insert.data.name == "Insert mesh" and insert.active_material.name == "Insert paint"
+    assert run("scene_digest", since_hash=painted).get("unchanged")
+    assert bpy.data.materials[orphan.name] == orphan
+mesh, paint = insert.data, insert.active_material
+bpy.data.objects.remove(insert, do_unlink=True)
+bpy.data.meshes.remove(mesh)
+bpy.data.materials.remove(paint)
 # Coordinate and shader changes can preserve vertex counts and bounding boxes.
 obj = bpy.data.objects["Small"]
 mat = bpy.data.materials.new("Paint")
