@@ -113,8 +113,9 @@ def join_paths(paths):
     loops = []
     while remaining:
         first, chain = remaining.pop(0)
+        members = [first]
         while (chain[-1] - chain[0]).length > 1e-6:
-            for i, (_, path) in enumerate(remaining):
+            for i, (entity, path) in enumerate(remaining):
                 if (path[0] - chain[-1]).length <= 1e-6:
                     chain.extend(path[1:])
                 elif (path[-1] - chain[-1]).length <= 1e-6:
@@ -122,15 +123,16 @@ def join_paths(paths):
                 else:
                     continue
                 remaining.pop(i)
+                members.append(entity)
                 break
             else:
                 break
         if len(chain) >= 4 and (chain[0] - chain[-1]).length <= 1e-6:
-            loops.append((first, chain[:-1]))
+            loops.append((first, chain[:-1], members))
     return loops
 
 
-def paths_and_loops(doc, segments=64):
+def paths_and_loops(doc, segments=64, dependencies=None):
     closed, paths, drawing = [], [], []
     for entity in doc.entities:
         args = entity.params
@@ -138,12 +140,15 @@ def paths_and_loops(doc, segments=64):
             is_closed = True
             if "source_entity" in args:
                 _, loop, is_closed = drawing[args["source_entity"]]
+                members = [args["source_entity"]]
             else:
                 profiles = sorted(closed + join_paths(paths), key=lambda pair: pair[0])
                 index = args["source"]
                 if not 0 <= index < len(profiles):
                     raise ValueError("Referenced profile is missing or open")
-                loop = profiles[index][1]
+                _, loop, members = profiles[index]
+            if dependencies is not None:
+                dependencies[entity.eid] = members
             if entity.etype == "OFFSET_LOOP":
                 points = offset_loop(loop, args["distance"])
             else:
@@ -155,6 +160,9 @@ def paths_and_loops(doc, segments=64):
         else:
             points, is_closed = sample(doc, entity, segments)
         drawing.append((entity, points, is_closed))
-        (closed if is_closed else paths).append((entity.eid, points))
+        if is_closed:
+            closed.append((entity.eid, points, [entity.eid]))
+        else:
+            paths.append((entity.eid, points))
     boundaries = sorted(closed + join_paths(paths), key=lambda pair: pair[0])
-    return drawing, [points for _, points in boundaries]
+    return drawing, [points for _, points, _ in boundaries]

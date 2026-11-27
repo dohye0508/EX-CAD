@@ -216,8 +216,8 @@ class SketchDocument:
         b: int = -1,
         c: int = -1,
         d: int = -1,
-        value: float = 0.0,
-        value2: float = 0.0,
+        value: float | None = None,
+        value2: float | None = None,
     ) -> int:
         ctype = ctype.upper()
         if ctype in {"TANGENT", "CONCENTRIC", "RADIUS"}:
@@ -240,6 +240,10 @@ class SketchDocument:
                 raise ValueError(f"Unknown constraint {ctype}")
             if any(not 0 <= i < len(self.points) for i in (a, b, c, d)[:arities[ctype]]):
                 raise ValueError("Constraint refers to a missing point")
+        if value is None:
+            value = self.points[a].u if ctype == "FIXED" else 0.0
+        if value2 is None:
+            value2 = self.points[a].v if ctype == "FIXED" else 0.0
         cid = len(self.constraints)
         self.constraints.append(SketchConstraint(cid, ctype, a, b, c, d, float(value), float(value2)))
         return cid
