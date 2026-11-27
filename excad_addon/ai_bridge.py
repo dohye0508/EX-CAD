@@ -548,6 +548,17 @@ class AiBridgeServer:
             )
             return {"ok": True, "cameras": len(cams), "manifest": manifest, "views": faces}
 
+        if cmd == "sdf_generate":
+            from .sdf_engine import generate_sdf
+            obj = generate_sdf(**{k:v for k,v in data.items() if k != "cmd"})
+            return {"ok": True, "name": obj.name, "verts": len(obj.data.vertices), "faces": len(obj.data.polygons)}
+        if cmd == "generate_3d":
+            from .ai_3d_provider import generate_3d
+            return {"ok": True, **generate_3d(**{k:v for k,v in data.items() if k != "cmd"})}
+        if cmd == "poly_bake":
+            from .uv_bake import bake
+            obj = bpy.context.scene.objects[data["object"]]
+            return {"ok": True, **bake(obj, **{k:v for k,v in data.items() if k not in {"cmd","object"}})}
         if cmd == "poly_reconstruct":
             center = tuple(data.get("center", [0.0, 0.0, 0.9]))
             obj, n_views = polyhedron_engine.reconstruct_from_polyhedron_views(
@@ -560,6 +571,9 @@ class AiBridgeServer:
                 smooth_iters=int(data.get("smooth_iters", 4)),
                 project_colors=bool(data.get("project_colors", True)),
                 name=data.get("name", "EXCAD_PolyMesh"),
+                use_depth=data.get("use_depth", True),
+                texture_mode=data.get("texture_mode", "UV"),
+                texture_size=data.get("texture_size", 2048),
             )
             return {
                 "ok": True,

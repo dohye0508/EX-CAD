@@ -203,7 +203,8 @@ def _load_rgba_and_mask(image_path: str, threshold: float = 0.15):
     existing = set(bpy.data.images.keys())
     img = bpy.data.images.load(image_path, check_existing=True)
     w, h = img.size[0], img.size[1]
-    arr = np.array(img.pixels[:], dtype=np.float32).reshape((h, w, 4))
+    arr = np.empty((h, w, 4), dtype=np.float32)
+    img.pixels.foreach_get(arr.ravel())
     if img.name not in existing:
         bpy.data.images.remove(img)
 
@@ -320,7 +321,7 @@ def project_colors_to_mesh(
         idx = idx[m_hits]
         if len(idx) == 0:
             continue
-        weights = (facing[idx] ** 2)
+        weights = (facing[idx] ** 3)
         accum_rgb[idx] += rgb[py[idx], px[idx]] * weights[:, None]
         accum_w[idx] += weights
 
@@ -362,6 +363,9 @@ def reconstruct_from_polyhedron_views(
     smooth_iters: int = 4,
     project_colors: bool = True,
     name: str = "EXCAD_PolyMesh",
+    use_depth: bool = True,
+    texture_mode: str = "VERTEX",
+    texture_size: int = 2048,
 ):
     faces = get_polyhedron_faces(poly_type)
     views = []
@@ -392,6 +396,16 @@ def reconstruct_from_polyhedron_views(
         in_bounds = (px >= 0) & (px < w) & (py >= 0) & (py < h)
         sampled = np.zeros(rel.shape[0], dtype=bool)
         sampled[in_bounds] = mask[py[in_bounds], px[in_bounds]]
+        depth_file = os.path.join(image_dir, os.path.splitext(f["filename"])[0] + "_depth.png")
+        if use_depth and os.path.isfile(depth_file):
+            from .uv_bake import read_depth
+            depth = read_depth(depth_file)
+            if depth.shape != mask.shape:
+                raise ValueError("Depth and color view dimensions must match")
+            idx = np.flatnonzero(sampled)
+            # Black is the near side of the reconstruction cube; white is the far side.
+            distance = 0.5 - rel[idx] @ np.asarray(f["normal"]) / size
+            sampled[idx] &= distance >= depth[py[idx], px[idx]] - 0.5/res
         inside &= sampled
 
     inside_3d = inside.reshape((res, res, res))
@@ -423,7 +437,10 @@ def reconstruct_from_polyhedron_views(
     for poly in obj.data.polygons:
         poly.use_smooth = True
 
-    if project_colors:
+    if project_colors and texture_mode.upper() == "UV":
+        from .uv_bake import bake
+        bake(obj, image_dir, poly_type, center, size, texture_size, threshold=threshold)
+    elif project_colors:
         project_colors_to_mesh(obj, poly_type=poly_type, image_dir=image_dir, size=size, center=center, threshold=threshold)
 
     return obj, len(views)
