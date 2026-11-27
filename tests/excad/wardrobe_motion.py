@@ -13,8 +13,10 @@ import numpy as np
 from mathutils import Vector
 
 from excad_addon.ai_bridge import AiBridgeServer
+from excad_addon.character_stylizer import _vgroup_center
 from excad_addon.oneshot_generators import _BONE_ALIASES
 from excad_addon.scene_mesh import read_surface
+from excad_addon.wardrobe import rest_mesh
 
 addon_utils.enable("bl_ext.blender_org.mpfb", default_set=True)
 bridge = AiBridgeServer.instance()
@@ -119,6 +121,28 @@ def check_open_lapels(shirt, jacket):
         assert exposed > 10 and missing <= max(1, exposed * 0.005), (slope, missing, exposed)
 
 
+def check_exposed_skin(person, shirt):
+    body = person.vertex_groups["body"].index
+    coverage = person.vertex_groups[shirt["excad_coverage_group"]].index
+    ids = np.array([v.index for v in person.data.vertices if any(g.group == body for g in v.groups)])
+    with rest_mesh(person) as mesh:
+        points = np.asarray([mesh.vertices[int(i)].co for i in ids])
+        span = np.ptp(points[:, 2])
+        neck = _vgroup_center(person, mesh, ("joint-neck",))
+        regions = [ids[points[:, 2] > neck.z + 0.075 * span]]
+        for side in ("l", "r"):
+            wrist = _vgroup_center(person, mesh, (f"joint-{side}-hand",))
+            elbow = _vgroup_center(person, mesh, (f"joint-{side}-elbow",))
+            offset = points - wrist
+            along = offset @ (wrist - elbow).normalized()
+            regions.append(ids[(along > 0.045 * span) & (np.linalg.norm(offset, axis=1) < 0.14 * span)])
+    for exposed in regions:
+        assert len(exposed) > 10
+        assert all(
+            not any(g.group == coverage for g in person.data.vertices[int(i)].groups) for i in exposed
+        ), "Clothing covered the face or fingers"
+
+
 with tempfile.TemporaryDirectory() as tmp:
     image_dir = Path(os.getenv("EXCAD_TEST_VARIANTS", tmp))
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -158,8 +182,9 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         obj = bpy.context.scene.objects["Person"]
         bones = obj.find_armature().pose.bones
+        parts = {o.get("excad_slot"): o for o in bpy.context.scene.objects if o.get("excad_human") == obj}
+        check_exposed_skin(obj, parts["top"])
         if "JACKET" in clothes:
-            parts = {o.get("excad_slot"): o for o in bpy.context.scene.objects if o.get("excad_human") == obj}
             check_open_lapels(parts["top"], parts["outerwear"])
 
         def bone(role):

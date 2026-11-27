@@ -425,6 +425,27 @@ def _tailored(human, style):
     return obj
 
 
+def _fill_coverage_gaps(covered, ambiguous, neighbors):
+    """Close skin islands enclosed by fabric. Leave every region reaching exposed skin open."""
+    while ambiguous:
+        start = ambiguous.pop()
+        patch, pending = {start}, [start]
+        enclosed, touches_cover = True, False
+        while pending:
+            for other in neighbors.get(pending.pop(), ()):
+                if other in ambiguous:
+                    ambiguous.remove(other)
+                    patch.add(other)
+                    pending.append(other)
+                elif other not in patch:
+                    if other in covered:
+                        touches_cover = True
+                    else:
+                        enclosed = False
+        if enclosed and touches_cover:
+            covered.update(patch)
+
+
 def garment_clearance(human, garment):
     """Move inward cloth vertices to the fitted skin and mask skin covered by fabric.
 
@@ -480,31 +501,38 @@ def garment_clearance(human, garment):
             for i, p in enumerate(samples):
                 kd.insert(p, i)
             kd.balance()
-        incident = {}
+        incident, neighbors = {}, {}
         for face in faces:
             for a, b in zip(face, face[1:] + face[:1]):
                 length = (points[a] - points[b]).length
                 incident[a] = max(incident.get(a, 0), length)
                 incident[b] = max(incident.get(b, 0), length)
-        covered = []
+                neighbors.setdefault(a, set()).add(b)
+                neighbors.setdefault(b, set()).add(a)
+        covered, ambiguous = set(), set()
         for i in body_ids:
             hit, n, _, distance = cover.find_nearest(points[i])
             if hit is None or distance > height * 0.05:
                 continue
             normal = skin.vertices[i].normal
+            hem_margin = max(height * 0.003, incident.get(i, 0) * 0.68)
             if normal.dot(n) < 0.25:
                 # At an armpit the opposite sleeve wall can be the nearest
                 # face. An outward ray finds the panel covering this skin.
+                nearest = hit
                 hit, n, _, _ = cover.ray_cast(points[i], normal, height * 0.05)
                 if hit is None or normal.dot(n) < 0.25:
+                    if kd is None or kd.find(nearest)[2] >= hem_margin:
+                        ambiguous.add(i)
                     continue
-            if kd and kd.find(hit)[2] < max(height * 0.003, incident.get(i, 0) * 0.68):
+            if kd and kd.find(hit)[2] < hem_margin:
                 continue
-            covered.append(i)
+            covered.add(i)
+        _fill_coverage_gaps(covered, ambiguous, neighbors)
     if covered:
         name = "EXCAD.Cover." + garment.name
         group = human.vertex_groups.new(name=name)
-        group.add(covered, 1, "REPLACE")
+        group.add(sorted(covered), 1, "REPLACE")
         mod = human.modifiers.new(group.name, "MASK")
         mod.vertex_group = group.name
         mod.invert_vertex_group = True

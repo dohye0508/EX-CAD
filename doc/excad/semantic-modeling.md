@@ -151,7 +151,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/sdf_rebuild.py
 & $blenderExe -b (Join-Path $env:EXCAD_TEST_VARIANTS 'dressed.blend') --python-exit-code 1 --python tests/excad/portrait_render.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py
-& $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003 81128007 81128018 81128021
+& $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003 81128007 81128018 81128021 81128053
 ```
 
 `overlay.py`는 GPU가 있는 머신에서 창을 열지 않고 실제 GPU 프레임 버퍼에 선과 치수를 그린다. `tests/excad/trellis_transport.py`는 TRELLIS의 Gradio 4.44.1 및 5.34.2 환경에서 일반 Python으로 실행한다. 이 테스트는 한 세션 안에서 이미지 업로드·전처리·3D 작업·GLB 추출까지 이어지는 전송 경로를 검사한다. 모델 추론에는 별도로 실행 중인 모델 서버나 서비스 계정이 필요하다.
