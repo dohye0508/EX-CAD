@@ -10,6 +10,7 @@ import socket
 import threading
 
 import bpy
+from .protocol import dsl_lines, json_command
 
 from . import asset_fetcher, character_stylizer, city_generator, human_engine, image_sketch_engine, oneshot_generators, polyhedron_engine, sketch_engine
 
@@ -19,19 +20,11 @@ def _jdump(obj: dict) -> str:
 
 
 COMPACT_SCHEMA = (
-    "EX-CAD TCP 127.0.0.1:9877 JSON-lines. "
-    "DSL(cmd='dsl',code='...'): "
-    "S <XY|XZ|YZ>; R <u0> <v0> <w> <h>; C <cu> <cv> <r>; L <u0> <v0> <u1> <v1>; "
-    "SOLVE; EX <d> [sym=0|1] [name]; RV <deg> [segs=48] [name]; "
-    "H [preset] [eth] [rig] [skin=0|1] [subdiv=1]; "
-    "IMG <front> [side|-] [mode] [h=1.75] [d=0.3]; "
-    "POLY <6|8|12|20> <dir> [res=56] [color=1]; FIND <query>; USE <query|path> [place] [h=0]; "
-    "STAGE [preset] [pose] [eth] [backdrop]; POSE <name>; PART <GEAR|FLANGE|BRACKET|ENCLOSURE|BOLT> [size] [detail]; "
-    "PROP <TABLE|CHAIR|SHELF|PEDESTAL> [scale]; STUDIO [CYCLORAMA|ROOM]; CITY [blocks=5] [seed=42] [night=0|1]; DIGEST. "
-    "JSON cmds: batch, scene_digest, oneshot_stage, oneshot_pose, oneshot_part, oneshot_prop, oneshot_studio, "
-    "asset_search, asset_use, human_generate, human_list_targets, human_apply_target, "
-    "image_trace_sketch, image_to_mesh, poly_create_rig, poly_reconstruct, poly_project_colors, "
-    "asset_fetch_url, asset_fetch_git."
+    "JSONL 127.0.0.1:9877. batch{steps:[{cmd,...}],return_all?}; "
+    "dsl{code:'command {JSON args};command {JSON args}'}; scene_digest{since_hash?}. "
+    "Shortcuts: S plane; R u v w h; C u v r; L u v u v; SOLVE; EX depth sym name; "
+    "RV deg segments name; H preset; IMG front; POLY faces dir; FIND/USE query; "
+    "STAGE; POSE name; PART type size; PROP type scale; STUDIO; CITY; STYLE; DIGEST."
 )
 
 _POLY_MAP = {
@@ -98,6 +91,9 @@ class AiBridgeServer:
         return h, rows
 
     def _run_dsl_line(self, line: str) -> dict:
+        command = json_command(line)
+        if command is not None:
+            return self._dispatch_dict(command)
         toks = shlex.split(line)
         if not toks:
             return {"ok": True}
@@ -232,6 +228,14 @@ class AiBridgeServer:
         return _jdump(res)
 
     def _dispatch_dict(self, data: dict) -> dict:
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("Expected a command object")
+            return self._execute(data)
+        except (KeyError, TypeError, IndexError, ValueError, RuntimeError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _execute(self, data: dict) -> dict:
         cmd = data.get("cmd", "")
         doc = sketch_engine.SketchDocument.active()
 
@@ -274,26 +278,31 @@ class AiBridgeServer:
             return_all = bool(data.get("return_all", False))
             results = []
             last = {"ok": True}
-            for step in steps:
+            success = True
+            for index, step in enumerate(steps, 1):
                 last = self._dispatch_dict(step)
+                success = success and last.get("ok", False)
                 if return_all:
                     results.append(last)
                 if stop_on_error and not last.get("ok", False):
-                    out = {"ok": False, "steps_run": len(results) if return_all else steps.index(step) + 1, "last": last}
+                    out = {"ok": False, "steps_run": index, "last": last}
                     if return_all:
                         out["results"] = results
                     return out
-            out = {"ok": True, "steps_run": len(steps), "last": last}
+            out = {"ok": success, "steps_run": len(steps), "last": last}
             if return_all:
                 out["results"] = results
             return out
 
         if cmd == "dsl":
             code = data.get("code", "")
-            lines = [ln.strip() for chunk in code.splitlines() for ln in chunk.split(";") if ln.strip()]
+            lines = list(dsl_lines(code))
             last = {"ok": True}
             for idx, ln in enumerate(lines):
-                last = self._run_dsl_line(ln)
+                try:
+                    last = self._run_dsl_line(ln)
+                except (KeyError, TypeError, IndexError, ValueError) as exc:
+                    last = {"ok": False, "error": str(exc)}
                 if not last.get("ok", False):
                     return {"ok": False, "n": idx + 1, "last": last}
             return {"ok": True, "n": len(lines), "last": last}
