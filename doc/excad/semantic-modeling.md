@@ -8,6 +8,8 @@ Windows 저장소 루트에서 `cmd /c install_blender_addon.bat`를 실행한�
 
 MCP 클라이언트의 stdio 서버 명령에는 `python`을, 인수에는 저장소의 `excad_mcp_server.py` 절대 경로를 지정한다. `EXCAD_PORT`로 포트를 바꿀 수 있다.
 
+공식 Python MCP SDK 1.30.0의 `initialize`와 2.3.0의 `server/discover`로 각각 네 도구를 호출해 PNG와 장면 복원을 확인했다. 재현하려면 `EXCAD_TEST_MCP_PYTHONS`에 해당 SDK가 설치된 Python 실행 파일 경로를 설정한 뒤 아래 `layout.py` 테스트를 실행한다. Windows에서는 여러 경로를 `;`로 구분한다. [MCP 버전 협상 규격](https://modelcontextprotocol.io/docs/2026-07-28/learn/versioning)
+
 | 도구 | 쓰임 |
 | --- | --- |
 | `excad_schema` | 빈 인수로 명령 목록을 읽는다. `topic`에 `sketch`, `cad`, `character`, `organic`, `scene` 중 하나를 주면 해당 필드를 볼 수 있다. |

@@ -83,8 +83,7 @@ def handle(message):
             reply["error"] = {"code":-32022,"message":"Unsupported protocol version",
                               "data":{"supported":[MODERN,*LEGACY],"requested":version}}
         elif method=="server/discover":
-            reply["result"] = {"supportedVersions":[MODERN,*LEGACY],"capabilities":CAPABILITIES,
-                               "_meta":{"io.modelcontextprotocol/serverInfo":INFO}}
+            reply["result"] = {"supportedVersions":[MODERN,*LEGACY],"capabilities":CAPABILITIES}
         elif method=="initialize":
             requested = params.get("protocolVersion")
             reply["result"] = {"protocolVersion":requested if requested in LEGACY else LEGACY[0],
@@ -97,6 +96,12 @@ def handle(message):
             reply["result"]=call(params["name"],params.get("arguments",{}))
         else:
             reply["error"]={"code":-32601,"message":"Method not found"}
+        if "result" in reply and (version == MODERN or method == "server/discover"):
+            result = reply["result"]
+            result["resultType"] = "complete"
+            result["_meta"] = {"io.modelcontextprotocol/serverInfo": INFO}
+            if method in {"server/discover", "tools/list"}:
+                result.update(ttlMs=0, cacheScope="private")
     except (TypeError,KeyError,ValueError,AttributeError) as exc:
         reply["error"]={"code":-32602,"message":str(exc)}
     return reply

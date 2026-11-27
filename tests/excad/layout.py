@@ -370,14 +370,30 @@ def client():
     result.update(stdout=proc.stdout, stderr=proc.stderr, code=proc.returncode)
 
 
-t = threading.Thread(target=client)
-t.start()
-deadline = time.monotonic() + 50
-while t.is_alive() and time.monotonic() < deadline:
-    bridge._timer_poll()
-    time.sleep(0.005)
-t.join(1)
-bridge.stop()
+def pump_while(active, timeout):
+    deadline = time.monotonic() + timeout
+    while active():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("MCP client did not finish")
+        bridge._timer_poll()
+        time.sleep(0.005)
+
+
+try:
+    t = threading.Thread(target=client)
+    t.start()
+    pump_while(t.is_alive, 50)
+    t.join()
+    for executable in filter(None, os.getenv("EXCAD_TEST_MCP_PYTHONS", "").split(os.pathsep)):
+        with subprocess.Popen([executable, str(Path(__file__).with_name("mcp_client.py"))], env=env) as proc:
+            try:
+                pump_while(lambda: proc.poll() is None, 90)
+                assert proc.returncode == 0, (executable, proc.returncode)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+finally:
+    bridge.stop()
 assert result.get("code") == 0, result.get("stderr")
 messages = [json.loads(s)["result"] for s in result["stdout"].splitlines()]
 assert len(messages) == 8
