@@ -45,6 +45,20 @@ async def check(server):
         initial, _ = await call("excad_digest")
         name = "SDK test " + sdk
         mark = "Before " + name
+        bad_steps = [
+            {"cmd": "sdf_generate", "name": "Invalid batch prefix", "tree": {"type": "sphere", "radius": 0.3}},
+            "not a command object",
+        ]
+        for tool, args, field in (
+            ("excad_run", {"steps": bad_steps}, "steps[1]"),
+            ("excad_inspect", {"size": True}, "size"),
+            ("excad_inspect", {"views": ["TOP"]}, "views"),
+            ("excad_schema", {"topic": "unknown"}, "topic"),
+        ):
+            rejected = (await client.call_tool(tool, args)).model_dump(by_alias=True)
+            assert rejected["isError"] and field in rejected["content"][0]["text"]
+        same, _ = await call("excad_digest", since_hash=initial["h"])
+        assert same["unchanged"]
         await call("excad_run", steps=[{"cmd": "checkpoint", "name": mark}])
         try:
             await call(
@@ -60,7 +74,7 @@ async def check(server):
                 ],
             )
             delta, preview = await asyncio.gather(
-                call("excad_digest", since_hash=initial["h"]), call("excad_inspect", target=name, size=96)
+                call("excad_digest", since_hash=initial["h"]), call("excad_inspect", target=name, size=96.0)
             )
             assert delta[0]["changed"] and not preview[0]["warnings"]
             assert preview[0]["views"] == ["FRONT", "SIDE", "ISO", "TOP"]
