@@ -9,9 +9,12 @@ import tempfile
 
 import addon_utils
 import bpy
+import numpy as np
+from mathutils import Vector
 
 from excad_addon.ai_bridge import AiBridgeServer
 from excad_addon.oneshot_generators import _BONE_ALIASES
+from excad_addon.scene_mesh import read_surface
 
 addon_utils.enable("bl_ext.blender_org.mpfb", default_set=True)
 bridge = AiBridgeServer.instance()
@@ -80,6 +83,42 @@ def run(cmd, **args):
     return response
 
 
+def check_open_lapels(shirt, jacket):
+    """An opening exposing the whole shirt must still expose it after the underlay mask."""
+    graph = bpy.context.evaluated_depsgraph_get()
+    mask = next(m for m in shirt.modifiers if m.type == "MASK" and m.vertex_group == shirt["excad_underlay_group"])
+    visible, coat = read_surface(shirt, graph), read_surface(jacket, graph)
+    mask.show_viewport = False
+    try:
+        bpy.context.view_layer.update()
+        whole = read_surface(shirt, graph)
+    finally:
+        mask.show_viewport = True
+        bpy.context.view_layer.update()
+    low, high = whole.bounds
+    center, span = Vector((low + high) / 2), high[2] - low[2]
+    corners = np.array([[x, y, z] for x in (low[0], high[0]) for y in (low[1], high[1]) for z in (low[2], high[2])])
+    for slope in (-0.4, 0, 0.4):
+        eye = Vector((slope, -1, 0)).normalized()
+        right = Vector((-eye.y, eye.x, 0))
+        along = (corners - np.asarray(center)) @ right
+        missing, exposed = 0, 0
+        for x in np.linspace(along.min(), along.max(), 58):
+            for z in np.linspace(low[2], high[2], 64):
+                start = center + right * x + eye * (2 * span)
+                start.z = z
+                distance = whole.bvh.ray_cast(start, -eye)[3]
+                if distance is None:
+                    continue
+                outside = coat.bvh.ray_cast(start, -eye)[3]
+                if outside is not None and outside < distance + 0.12 * span:
+                    continue
+                exposed += 1
+                actual = visible.bvh.ray_cast(start, -eye)[3]
+                missing += actual is None or actual > distance + 0.01 * span
+        assert exposed > 10 and missing <= max(1, exposed * 0.005), (slope, missing, exposed)
+
+
 with tempfile.TemporaryDirectory() as tmp:
     image_dir = Path(os.getenv("EXCAD_TEST_VARIANTS", tmp))
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +158,9 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         obj = bpy.context.scene.objects["Person"]
         bones = obj.find_armature().pose.bones
+        if "JACKET" in clothes:
+            parts = {o.get("excad_slot"): o for o in bpy.context.scene.objects if o.get("excad_human") == obj}
+            check_open_lapels(parts["top"], parts["outerwear"])
 
         def bone(role):
             return next(bones[name] for name in _BONE_ALIASES[role] if name in bones)

@@ -190,20 +190,39 @@ def surface_shading(mesh, matrix, slots, materials, indices, triangles):
             pixels = pixels.copy()
             pixels[:, :, :3] *= np.array(mat["excad_albedo_multiplier"])
         textures.append(pixels)
-    lip = None
+    tint_mask = None
     attribute = mesh.color_attributes.get("EXCAD Lips")
-    if attribute and attribute.domain == "POINT":
+    hem = mesh.color_attributes.get("EXCAD Hem distance")
+    layer = attribute or hem
+    if layer and layer.domain == "POINT":
         tints = np.zeros((max(1, len(materials)), 3), np.float32)
         enabled = np.zeros(len(tints), np.bool_)
+        starts = np.zeros(len(tints), np.float32)
+        ends = np.ones(len(tints), np.float32)
         for i, material in enumerate(materials):
-            node = material.node_tree.nodes.get("Lip tint") if material and material.use_nodes else None
+            nodes = material.node_tree.nodes if material and material.use_nodes else None
+            node = nodes.get("Lip tint" if attribute else "Hem tint") if nodes else None
+            if node and not attribute and not nodes.get("Hem width"):
+                continue
             if node:
                 enabled[i] = True
                 tints[i] = node.inputs[2].default_value[:3]
-        colors = np.empty((len(attribute.data), 4), np.float32)
-        attribute.data.foreach_get("color", colors.ravel())
+                if not attribute:
+                    width = nodes["Hem width"]
+                    starts[i], ends[i] = width.inputs["From Max"].default_value, width.inputs["From Min"].default_value
+        colors = np.empty((len(layer.data), 4), np.float32)
+        layer.data.foreach_get("color", colors.ravel())
         material_ids = np.clip(slots, 0, len(tints) - 1)
-        lip = colors[triangles, 0] * enabled[material_ids, None], tints[material_ids]
+        span = (ends - starts)[material_ids, None]
+        # Clamp after barycentric interpolation so the trim has a measured width
+        # independent of the size or orientation of the garment's polygons.
+        mask = np.divide(
+            colors[triangles, 0] - starts[material_ids, None],
+            span,
+            out=np.zeros((len(triangles), 3), np.float32),
+            where=np.abs(span) > 1e-8,
+        )
+        tint_mask = mask * enabled[material_ids, None], tints[material_ids]
     finish = []
     for mat in materials:
         shader = _principled(mat)
@@ -212,7 +231,7 @@ def surface_shading(mesh, matrix, slots, materials, indices, triangles):
         else:
             finish.append((mat.roughness, mat.metallic) if mat else (0.6, 0))
     palette = np.asarray(finish or [(0.6, 0)], np.float32)
-    return normals[indices], uv, slots, textures, lip, palette[np.clip(slots, 0, len(palette) - 1)]
+    return normals[indices], uv, slots, textures, tint_mask, palette[np.clip(slots, 0, len(palette) - 1)]
 
 
 class Shading:
@@ -239,14 +258,14 @@ class Shading:
                 else np.full(len(slots), -1, np.int32)
             )
         self.ids = np.concatenate(ids)
-        self.lip = None
+        self.tint = None
         if any(s.shading[4] is not None for s in items):
             masks, colors = [], []
             for s in items:
                 mask, tint = s.shading[4] or (None, None)
                 masks.append(mask if mask is not None else np.zeros((len(s.triangles), 3), np.float32))
                 colors.append(tint if tint is not None else np.zeros((len(s.triangles), 3), np.float32))
-            self.lip = np.concatenate(masks), np.concatenate(colors)
+            self.tint = np.concatenate(masks), np.concatenate(colors)
 
     def sample(self, faces, points):
         triangles = self.tris[faces]
@@ -274,8 +293,8 @@ class Shading:
                 x, y = (coords[sel] * [tex.shape[1] - 1, tex.shape[0] - 1]).astype(np.int32).T
                 samples = tex[y, x]
                 colors[sel], alpha[sel] = samples[:, :3], samples[:, 3]
-        if self.lip:
-            mask, tint = self.lip
+        if self.tint:
+            mask, tint = self.tint
             mix = np.sum(weights * mask[faces], axis=1, keepdims=True).clip(0, 1)
             colors = colors * (1 - mix) + tint[faces] * mix
         return normals, colors, alpha

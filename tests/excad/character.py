@@ -85,6 +85,11 @@ for style in ("TSHIRT", "VNECK_SWEATER", "HOODIE", "JACKET", "PANTS", "SKIRT", "
     bpy.ops.wm.open_mainfile(filepath=fixture)
     obj = bpy.data.objects[wear(clothes=style)["added"][0]]
     assert obj.data.polygons and obj.find_armature() and any(v.groups for v in obj.data.vertices), style
+    if style in {"VNECK_SWEATER", "JACKET", "HOODIE"}:
+        distance = [v.color[0] for v in obj.data.color_attributes["EXCAD Hem distance"].data]
+        assert min(distance) == 0 and max(distance) > 0.04
+        assert obj.data.materials[0].node_tree.nodes["Fabric weave"].outputs["Normal"].is_linked
+        assert all(p.material_index == 0 for p in obj.data.polygons)
     print("GARMENT", style, flush=True)
     complement = (
         ["TSHIRT", "SHOES"]

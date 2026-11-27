@@ -1183,6 +1183,7 @@ def reload_addon(server):
         "face_fit",
         "human_assets",
         "hair_contact",
+        "portrait_materials",
         "wardrobe",
         "oneshot_generators",
         "city_generator",

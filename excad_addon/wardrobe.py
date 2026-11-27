@@ -236,8 +236,8 @@ def refit_fringe(human):
                 # envelope so a strand cannot pass through the mouth to the teeth.
                 offset = 0.0
                 # Keep the curved fringe over the brow with room for the lashes.
-                gap = span * (0.04 + 0.18 * math.exp(-((height - 0.02) / 0.46) ** 2))
-                for dz in ((-0.09, 0, 0.09) if height < 0.35 else (0,)):
+                gap = span * (0.04 + 0.18 * math.exp(-(((height - 0.02) / 0.46) ** 2)))
+                for dz in (-0.09, 0, 0.09) if height < 0.35 else (0,):
                     start = point + outward * (4 * span) + Vector((0, 0, dz * span))
                     hit = surface.ray_cast(start, -outward, 8 * span)[0]
                     if hit is not None:
@@ -403,14 +403,15 @@ def _tailored(human, style):
     for p in obj.data.polygons:
         for edge in p.edge_keys:
             counts[edge] = counts.get(edge, 0) + 1
-    borders = {v for edge, n in counts.items() if n == 1 for v in edge}
+    border_edges = [edge for edge, n in counts.items() if n == 1]
+    borders = {v for edge in border_edges for v in edge}
     seam = obj.vertex_groups.new(name="EXCAD seams")
     seam.add(list(borders), 1, "REPLACE")
     trim = _pbr_mat("EXCAD " + style + " trim", tuple(c * 0.62 for c in color), 0.84, sheen=0.2)
     obj.data.materials.append(trim)
-    for face in obj.data.polygons:
-        if any(i in borders for i in face.vertices):
-            face.material_index = 1
+    from .portrait_materials import finish_fabric
+
+    finish_fabric(obj, style, color, height, border_edges)
     transfer_weights(human, obj)
     sub = obj.modifiers.new("Finished neckline and cuffs", "SUBSURF")
     sub.levels = sub.render_levels = 1
@@ -614,19 +615,51 @@ def _mask_under_jacket(jacket, shirt, span):
             edges.insert(p, i)
         edges.balance()
         normals = inner.matrix_world.to_3x3().inverted().transposed()
+        # Masking a control vertex can remove the whole adjoining shirt panel.
+        # Protect the full panel width around the open lapels and collar.
+        shirt_points = [inner.matrix_world @ v.co for v in shirt_mesh.vertices]
+        reach = [0.0] * len(shirt_points)
+        for face in shirt_mesh.polygons:
+            ids = face.vertices[:]
+            for i in ids:
+                reach[i] = max(reach[i], max((shirt_points[j] - shirt_points[i]).length for j in ids))
         hide = []
         for vertex in shirt_mesh.vertices:
-            point = inner.matrix_world @ vertex.co
+            point = shirt_points[vertex.index]
             normal = (normals @ vertex.normal).normalized()
             hit, direction, _, _ = surface.ray_cast(point - normal * (0.01 * span), normal, 0.24 * span)
-            if hit is not None and abs(normal.dot(direction)) > 0.25 and edges.find(hit)[2] > 0.045 * span:
+            margin = max(0.045 * span, reach[vertex.index])
+            if hit is not None and abs(normal.dot(direction)) > 0.25 and edges.find(hit)[2] > margin:
                 hide.append(vertex.index)
             elif shirt.get("excad_outer_fabric"):
                 # Both tailored pieces use the same body panels. At a concave
                 # armhole their normals can miss the enclosing jacket entirely.
                 near, _, _, _ = surface.find_nearest(point, 0.12 * span)
-                if near is not None and edges.find(near)[2] > 0.09 * span:
+                if near is not None and edges.find(near)[2] > max(margin, 0.09 * span):
                     hide.append(vertex.index)
+        hidden = set(hide)
+        frame = inner.matrix_world.to_3x3()
+        front_views = [(frame @ Vector((x, -1, 0))).normalized() for x in (-0.75, -0.35, 0, 0.35, 0.75)]
+        for face in shirt_mesh.polygons:
+            ids = face.vertices[:]
+            if hidden.isdisjoint(ids):
+                continue
+            center = inner.matrix_world @ face.center
+            if edges.find(center)[2] > 0.18 * span + max(reach[i] for i in ids):
+                continue
+            normal = (normals @ face.normal).normalized()
+            samples = [center, *(shirt_points[i] for i in ids)]
+            # A shirt triangle may extend past an open lapel even if a ray
+            # along its own tilted normal reaches the jacket. Keep that face
+            # whenever the actual opening exposes it to a frontal view.
+            if any(
+                surface.ray_cast(p + view * (0.001 * span), view, 0.35 * span)[0] is None
+                for view in front_views
+                if normal.dot(view) > 0.2
+                for p in samples
+            ):
+                hidden.difference_update(ids)
+        hide = list(hidden)
     finally:
         if jacket_mesh is not None:
             outer.to_mesh_clear()
