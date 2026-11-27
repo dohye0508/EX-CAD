@@ -1166,6 +1166,7 @@ def reload_addon(server):
         "feature_tree",
         "human_engine",
         "asset_fetcher",
+        "view_fusion",
         "polyhedron_engine",
         "image_sketch_engine",
         "character_stylizer",

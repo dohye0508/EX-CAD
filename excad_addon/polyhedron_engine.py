@@ -227,44 +227,6 @@ def _load_rgba_and_mask(image_path: str, threshold: float = 0.15):
     return (srgb_to_linear(rgb) if encoded else rgb), mask
 
 
-def _extract_voxel_surface_bmesh(inside: np.ndarray, origin: tuple[float, float, float], step: float) -> bmesh.types.BMesh:
-    nx, ny, nz = inside.shape
-    bm = bmesh.new()
-    vgrid = np.full((nx + 1, ny + 1, nz + 1), -1, dtype=np.int32)
-    bm_verts = []
-
-    def get_v(ix: int, iy: int, iz: int):
-        vid = vgrid[ix, iy, iz]
-        if vid < 0:
-            vid = len(bm_verts)
-            bm_verts.append(bm.verts.new((origin[0] + ix * step, origin[1] + iy * step, origin[2] + iz * step)))
-            vgrid[ix, iy, iz] = vid
-        return bm_verts[vid]
-
-    def emit_quads(cond, corners_fn):
-        xs, ys, zs = np.where(cond)
-        for x, y, z in zip(xs.tolist(), ys.tolist(), zs.tolist()):
-            c0, c1, c2, c3 = corners_fn(x, y, z)
-            try:
-                bm.faces.new((get_v(*c0), get_v(*c1), get_v(*c2), get_v(*c3)))
-            except ValueError:
-                pass
-
-    p = np.pad(inside, 1, mode='constant', constant_values=False)
-    # +X, -X
-    emit_quads(inside & ~p[2:, 1:-1, 1:-1], lambda x, y, z: ((x + 1, y, z), (x + 1, y + 1, z), (x + 1, y + 1, z + 1), (x + 1, y, z + 1)))
-    emit_quads(inside & ~p[:-2, 1:-1, 1:-1], lambda x, y, z: ((x, y, z), (x, y, z + 1), (x, y + 1, z + 1), (x, y + 1, z)))
-    # +Y, -Y
-    emit_quads(inside & ~p[1:-1, 2:, 1:-1], lambda x, y, z: ((x, y + 1, z), (x, y + 1, z + 1), (x + 1, y + 1, z + 1), (x + 1, y + 1, z)))
-    emit_quads(inside & ~p[1:-1, :-2, 1:-1], lambda x, y, z: ((x, y, z), (x + 1, y, z), (x + 1, y, z + 1), (x, y, z + 1)))
-    # +Z, -Z
-    emit_quads(inside & ~p[1:-1, 1:-1, 2:], lambda x, y, z: ((x, y, z + 1), (x + 1, y, z + 1), (x + 1, y + 1, z + 1), (x, y + 1, z + 1)))
-    emit_quads(inside & ~p[1:-1, 1:-1, :-2], lambda x, y, z: ((x, y, z), (x, y + 1, z), (x + 1, y + 1, z), (x + 1, y, z)))
-
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    return bm
-
-
 def project_colors_to_mesh(
     obj,
     poly_type: str = 'DODECAHEDRON_12',
@@ -273,6 +235,8 @@ def project_colors_to_mesh(
     center: tuple[float, float, float] = (0.0, 0.0, 0.9),
     threshold: float = 0.15,
 ) -> int:
+    from .view_fusion import image_coordinates
+
     faces = get_polyhedron_faces(poly_type)
     views = []
     for f in faces:
@@ -310,14 +274,9 @@ def project_colors_to_mesh(
     for f, rgb, mask in views:
         h, w, _ = rgb.shape
         n_vec = np.array(f["normal"], dtype=np.float32)
-        r_vec = np.array(f["right"], dtype=np.float32)
-        u_vec = np.array(f["up"], dtype=np.float32)
-
         facing = world_no @ n_vec
-        du = rel @ r_vec
-        dv = rel @ u_vec
-        px = np.rint((du / float(size) + 0.5) * (w - 1)).astype(np.int32)
-        py = np.rint((dv / float(size) + 0.5) * (h - 1)).astype(np.int32)
+        px, py = image_coordinates(rel, f, size, w, h)
+        px, py = np.rint(px).astype(np.int32), np.rint(py).astype(np.int32)
 
         valid = (facing > 0.05) & (px >= 0) & (px < w) & (py >= 0) & (py < h)
         idx = np.where(valid)[0]
@@ -377,72 +336,50 @@ def reconstruct_from_polyhedron_views(
         raise ValueError("Reconstruction needs a positive size in Object Mode")
     if texture_mode.upper() not in {"UV", "VERTEX"}:
         raise ValueError("Use UV or VERTEX texture mode")
+    from .feature_tree import _solid
+    from .uv_bake import read_depth
+    from .view_fusion import fuse
+
+    if np.shape(center) != (3,) or not np.isfinite(center).all():
+        raise ValueError("Provide a finite three-dimensional projection center")
     image_dir = bpy.path.abspath(image_dir)
-    faces = get_polyhedron_faces(poly_type)
     views = []
-    for f in faces:
-        fpath = os.path.join(image_dir, f["filename"])
-        if os.path.isfile(fpath):
-            rgb, mask = _load_rgba_and_mask(fpath, threshold=threshold)
-            views.append((f, rgb, mask))
+    for face in get_polyhedron_faces(poly_type):
+        color_file = os.path.join(image_dir, face["filename"])
+        if os.path.isfile(color_file):
+            _, mask = _load_rgba_and_mask(color_file, threshold=threshold)
+            depth_file = os.path.splitext(color_file)[0] + "_depth.png"
+            depth = read_depth(depth_file) if use_depth and os.path.isfile(depth_file) else None
+            if depth is not None and depth.shape != mask.shape:
+                raise ValueError("Depth and color view dimensions must match")
+            views.append((face, mask, depth))
     if not views:
-        raise FileNotFoundError(f"No face_00.png .. face_{len(faces)-1:02d}.png found in {image_dir}")
+        raise FileNotFoundError(f"No face_XX.png files found in {image_dir}")
 
     res = max(16, min(112, int(resolution)))
-    half = 0.5 * float(size)
-    step = float(size) / res
-    coords = np.linspace(-half + 0.5 * step, half - 0.5 * step, res, dtype=np.float32)
-    gx, gy, gz = np.meshgrid(coords, coords, coords, indexing='ij')
-    rel = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
-
-    inside = np.ones(rel.shape[0], dtype=bool)
-    for f, _, mask in views:
-        h, w = mask.shape
-        r_vec = np.array(f["right"], dtype=np.float32)
-        u_vec = np.array(f["up"], dtype=np.float32)
-        du = rel @ r_vec
-        dv = rel @ u_vec
-        px = np.rint((du / float(size) + 0.5) * (w - 1)).astype(np.int32)
-        py = np.rint((dv / float(size) + 0.5) * (h - 1)).astype(np.int32)
-        in_bounds = (px >= 0) & (px < w) & (py >= 0) & (py < h)
-        sampled = np.zeros(rel.shape[0], dtype=bool)
-        sampled[in_bounds] = mask[py[in_bounds], px[in_bounds]]
-        depth_file = os.path.join(image_dir, os.path.splitext(f["filename"])[0] + "_depth.png")
-        if use_depth and os.path.isfile(depth_file):
-            from .uv_bake import read_depth
-            depth = read_depth(depth_file)
-            if depth.shape != mask.shape:
-                raise ValueError("Depth and color view dimensions must match")
-            idx = np.flatnonzero(sampled)
-            # Black is the near side of the reconstruction cube; white is the far side.
-            distance = 0.5 - rel[idx] @ np.asarray(f["normal"]) / size
-            sampled[idx] &= distance >= depth[py[idx], px[idx]] - 0.5/res
-        inside &= sampled
-
-    inside_3d = inside.reshape((res, res, res))
-    if not np.any(inside_3d):
-        raise RuntimeError("Visual Hull intersection is empty; check background threshold or image alignment")
-
-    origin = (center[0] - half, center[1] - half, center[2] - half)
+    points, polygons = fuse(views, size, center, res)
     selected = list(bpy.context.selected_objects)
     active = bpy.context.view_layer.objects.active
-    bm = _extract_voxel_surface_bmesh(inside_3d, origin, step)
     mesh = bpy.data.meshes.new(name)
     obj = None
     try:
-        try:
-            bm.to_mesh(mesh)
-        finally:
-            bm.free()
+        mesh.from_pydata(points, [], polygons)
+        mesh.update()
         obj = bpy.data.objects.new(name, mesh)
         bpy.context.collection.objects.link(obj)
         for other in selected:
             other.select_set(False)
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
-        obj.data.remesh_voxel_size = step * 1.15
-        if "FINISHED" not in bpy.ops.object.voxel_remesh() or not obj.data.polygons:
-            raise ValueError("Voxel remeshing produced no surface")
+        try:
+            _solid(mesh)
+        except ValueError:
+            # Ambiguous sign changes can connect components at a single vertex.
+            # Let Blender resolve their topology without voxelizing every smooth surface.
+            mesh.remesh_voxel_size = size / res * 0.85
+            if "FINISHED" not in bpy.ops.object.voxel_remesh():
+                raise ValueError("Voxel remeshing produced no surface")
+            _solid(obj.data)
 
         if smooth_iters > 0:
             mod = obj.modifiers.new("EXCAD_Smooth", 'SMOOTH')

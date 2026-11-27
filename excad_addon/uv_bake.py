@@ -10,6 +10,7 @@ import numpy as np
 from .inspection import _png
 from .image_colors import linear_to_srgb
 from .polyhedron_engine import _load_rgba_and_mask, get_polyhedron_faces
+from .view_fusion import image_coordinates
 
 
 def read_depth(path):
@@ -120,10 +121,10 @@ def _load_views(directory, poly_type, threshold, use_depth):
 def _sample(view, at, normals, size):
     face, rgb, mask, depth = view
     h, w = mask.shape
-    px = (at @ face["right"] / size + 0.5) * (w - 1)
-    py = (at @ face["up"] / size + 0.5) * (h - 1)
+    px, py = image_coordinates(at, face, size, w, h)
     facing = normals @ face["normal"]
-    idx = np.flatnonzero((px >= 0) & (py >= 0) & (px <= w - 1) & (py <= h - 1) & (facing > 0))
+    idx = np.flatnonzero((px >= -0.5) & (py >= -0.5) & (px <= w - 0.5) & (py <= h - 0.5) & (facing > 0))
+    px, py = np.clip(px, 0, w - 1), np.clip(py, 0, h - 1)
     ix, iy = np.rint(px[idx]).astype(int), np.rint(py[idx]).astype(int)
     idx = idx[mask[iy, ix]]
     x0, y0 = np.floor(px[idx]).astype(int), np.floor(py[idx]).astype(int)
