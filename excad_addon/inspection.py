@@ -49,15 +49,54 @@ def _png(path, rgb):
     )
 
 
-def _tile(tree, bounds, shading, view, size):
+def _studio_lights():
+    return [
+        (np.array(obj.matrix_world.translation), np.asarray(obj.data.color), float(obj.data.energy), obj.data.size)
+        for obj in bpy.context.scene.objects
+        if obj.type == "LIGHT"
+        and obj.data.type == "AREA"
+        and obj.get("excad_light")
+        and not obj.hide_render
+        and obj.visible_get()
+    ]
+
+
+def _illuminate(points, normals, colors, finish, eye, key, studio):
+    rough, metal = finish[:, 0:1], finish[:, 1:2]
+    result = colors * (0.30 + 0.06 * metal)
+    if studio:
+        lights = []
+        for position, tint, energy, size in studio:
+            vector = position - points
+            distance = np.maximum(np.linalg.norm(vector, axis=1, keepdims=True), 1e-8)
+            lights.append(
+                (vector / distance, tint * energy / (75 * distance**2), np.minimum(0.8, 0.5 * size / distance))
+            )
+    else:
+        lights = [(key, 0.72, 0.22)]
+    for direction, irradiance, spread in lights:
+        diffuse = np.maximum(0, (normals * direction).sum(axis=1, keepdims=True))
+        half_vector = direction + eye
+        half_vector = half_vector / np.maximum(1e-8, np.linalg.norm(half_vector, axis=-1, keepdims=True))
+        shine = np.maximum(0, (normals * half_vector).sum(axis=1, keepdims=True))
+        exponent = np.maximum(2, 2 / np.maximum(0.01, rough**2 + spread**2) - 2)
+        reflectance = 0.04 * (1 - metal) + colors * metal
+        result += irradiance * (
+            colors * diffuse * (1 - 0.45 * metal) + reflectance * shine**exponent * (1 - 0.6 * rough) * (diffuse > 0)
+        )
+    return result
+
+
+def _tile(tree, bounds, shading, view, size, studio):
     eye = Vector(DIRECTIONS[view]).normalized()
     right = Vector((1, 0, 0)) if view == "TOP" else Vector((0, 0, 1)).cross(eye).normalized()
     up = eye.cross(right)
     corners = np.array([[x, y, z] for x in bounds[:, 0] for y in bounds[:, 1] for z in bounds[:, 2]])
-    step = max(np.ptp(corners @ right), np.ptp(corners @ up), 1e-6) / (size * 0.84)
+    top, bottom = max(19, size * 0.08), size * 0.08
+    step = max(np.ptp(corners @ right) / (size * 0.84), np.ptp(corners @ up) / (size - top - bottom), 1e-8)
     distance = float(np.linalg.norm(bounds[1] - bounds[0])) + 1
     center = Vector(bounds.mean(axis=0)) + eye * distance
-    start = center + (up - right) * ((size - 1) * step / 2)
+    start = center + (up * (size - 1 + top - bottom) - right * (size - 1)) * (step / 2)
     rows = start, -up * step, right * step
     light = (eye * 0.8 + up * 0.9 - right * 0.55).normalized()
     ids = np.full((size, size), -1, dtype=np.int32)
@@ -80,8 +119,15 @@ def _tile(tree, bounds, shading, view, size):
             break
         normals, colors, alpha = shading.sample(ids[y, x], positions[y, x])
         visible = alpha >= 0.4
-        intensity = 0.33 + 0.67 * np.maximum(0, normals[visible] @ np.asarray(light))
-        linear = colors[visible] * intensity[:, None]
+        linear = _illuminate(
+            positions[y[visible], x[visible]],
+            normals[visible],
+            colors[visible],
+            shading.finish[ids[y[visible], x[visible]]],
+            np.asarray(eye),
+            np.asarray(light),
+            studio,
+        )
         rgb[y[visible], x[visible]] = np.clip(255 * linear_to_srgb(linear), 0, 255).astype(np.uint8)
         y, x = y[~visible], x[~visible]
         # See the face behind transparent hair and eyelash cards.
@@ -242,10 +288,11 @@ def render_inspect(target="ALL", views=("FRONT", "SIDE", "ISO", "TOP"), path=Non
         else BVHTree.FromPolygons(vertices.tolist(), np.concatenate(faces).tolist(), all_triangles=True)
     )
     shading = Shading(items)
+    studio = _studio_lights()
     grid = np.full((size * 2 + 2, size * 2 + 2, 3), 255, np.uint8)
     for i, view in enumerate(views):
         y, x = (i // 2) * (size + 2), (i % 2) * (size + 2)
-        grid[y : y + size, x : x + size] = _tile(tree, bounds, shading, view, size)
+        grid[y : y + size, x : x + size] = _tile(tree, bounds, shading, view, size, studio)
     warnings, contacts, topology = _diagnostics(items)
     dest = Path(bpy.path.abspath(path)).resolve() if path else None
     directory = dest.parent if dest else Path(tempfile.gettempdir())

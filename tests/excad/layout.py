@@ -227,6 +227,31 @@ assert len(lights) == 3
 light_digest = run("scene_digest", include_all=True)["h"]
 assert run("light_studio", target="Planter", style="PRODUCT", power=1.1)["lights"] == lights
 assert len(run("scene_digest", include_all=True, since_hash=light_digest)["changed"]) == 3
+
+
+def preview_pixels():
+    result = run("render_inspect", target="Planter", size=96)
+    path = Path(result["path"])
+    image = bpy.data.images.load(str(path), check_existing=False)
+    try:
+        pixels = np.empty(len(image.pixels), np.float32)
+        image.pixels.foreach_get(pixels)
+        return pixels.reshape(-1, 4)[:, :3]
+    finally:
+        bpy.data.images.remove(image)
+        path.unlink()
+
+
+glaze = preview_pixels()
+run("set_material", object="Planter", preset="CERAMIC", color=[0.095, 0.40, 0.36], roughness=0.9, metallic=0.85)
+metal = preview_pixels()
+assert np.count_nonzero(np.abs(glaze - metal) > 0.018) > 500
+run("light_studio", target="Planter", style="PRODUCT", power=0.22)
+dimmed = preview_pixels()
+assert np.mean(metal - dimmed) > 0.01
+run("light_studio", target="Planter", style="PRODUCT", power=1.1)
+run("set_material", object="Planter", preset="CERAMIC", color=[0.095, 0.40, 0.36])
+assert np.array_equal(glaze, preview_pixels())
 out = Path(os.getenv("EXCAD_TEST_OUTPUT", bpy.app.tempdir))
 out.mkdir(parents=True, exist_ok=True)
 inspection = run("render_inspect", target="ALL", size=240, path=str(out / "phase4-layout.png"))

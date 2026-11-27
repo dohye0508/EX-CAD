@@ -15,25 +15,27 @@ from .image_colors import has_srgb_bytes, srgb_to_linear
 _thumbnails = OrderedDict()
 
 
-def _base_color_socket(mat):
+def _principled(mat):
     if mat and mat.use_nodes:
         for shader in mat.node_tree.nodes:
             if shader.type == "BSDF_PRINCIPLED" and shader.outputs[0].is_linked:
-                return shader.inputs["Base Color"]
+                return shader
     return None
 
 
 def material_color(mat, fallback=(0.42, 0.57, 0.70)):
     if not mat:
         return fallback
-    socket = _base_color_socket(mat)
+    shader = _principled(mat)
+    socket = shader.inputs["Base Color"] if shader else None
     return socket.default_value[:3] if socket and not socket.is_linked else mat.diffuse_color[:3]
 
 
 def _texture_node(mat):
     if not mat or not mat.use_nodes:
         return None
-    socket = _base_color_socket(mat)
+    shader = _principled(mat)
+    socket = shader.inputs["Base Color"] if shader else None
     if socket is not None:
         queue = [link.from_node for link in socket.links]
         seen = set()
@@ -202,7 +204,15 @@ def surface_shading(mesh, matrix, slots, materials, indices, triangles):
         attribute.data.foreach_get("color", colors.ravel())
         material_ids = np.clip(slots, 0, len(tints) - 1)
         lip = colors[triangles, 0] * enabled[material_ids, None], tints[material_ids]
-    return normals[indices], uv, slots, textures, lip
+    finish = []
+    for mat in materials:
+        shader = _principled(mat)
+        if shader:
+            finish.append((shader.inputs["Roughness"].default_value, shader.inputs["Metallic"].default_value))
+        else:
+            finish.append((mat.roughness, mat.metallic) if mat else (0.6, 0))
+    palette = np.asarray(finish or [(0.6, 0)], np.float32)
+    return normals[indices], uv, slots, textures, lip, palette[np.clip(slots, 0, len(palette) - 1)]
 
 
 class Shading:
@@ -211,10 +221,11 @@ class Shading:
         self.normals = np.concatenate([s.shading[0] for s in items])
         self.uv = np.concatenate([s.shading[1] for s in items])
         self.colors = np.concatenate([s.colors for s in items])
+        self.finish = np.concatenate([s.shading[5] for s in items])
         self.textures = []
         ids = []
         for surface in items:
-            _, _, slots, textures, _ = surface.shading
+            _, _, slots, textures, _, _ = surface.shading
             mapping = []
             for t in textures:
                 if t is None:
