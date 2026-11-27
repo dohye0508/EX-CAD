@@ -17,9 +17,10 @@ def signed_area(loop):
 
 
 def circle_points(center, radius, start, span, steps, endpoint):
-    return [center + radius * Vector((math.cos(start + span * i / steps),
-                                      math.sin(start + span * i / steps)))
-            for i in range(steps + int(endpoint))]
+    return [
+        center + radius * Vector((math.cos(start + span * i / steps), math.sin(start + span * i / steps)))
+        for i in range(steps + int(endpoint))
+    ]
 
 
 def circumcenter(a, b, c):
@@ -27,8 +28,12 @@ def circumcenter(a, b, c):
     det = 2 * cross(u, v)
     if abs(det) <= 1e-10 * max(u.length_squared, v.length_squared, 1e-12):
         raise ValueError("A three-point arc needs noncollinear points")
-    return a + Vector(((v.y * u.length_squared - u.y * v.length_squared) / det,
-                       (u.x * v.length_squared - v.x * u.length_squared) / det))
+    return a + Vector(
+        (
+            (v.y * u.length_squared - u.y * v.length_squared) / det,
+            (u.x * v.length_squared - v.x * u.length_squared) / det,
+        )
+    )
 
 
 def offset_loop(loop, distance):
@@ -43,23 +48,24 @@ def offset_loop(loop, distance):
         if denom < 1e-7:
             raise ValueError("Offset has a reversed or degenerate corner")
         result.append(p + (na + nb) * (distance / denom))
-    if any((result[(i + 1) % len(loop)] - result[i]).dot(loop[(i + 1) % len(loop)] - p) <= 0
-           for i, p in enumerate(loop)):
+    if any(
+        (result[(i + 1) % len(loop)] - result[i]).dot(loop[(i + 1) % len(loop)] - p) <= 0 for i, p in enumerate(loop)
+    ):
         raise ValueError("Offset collapses the profile")
     return result
 
 
 def _spline(points, closed, steps):
-    points = ([points[-1]] + points + points[:2] if closed
-              else [points[0]] + points + [points[-1]])
+    points = [points[-1]] + points + points[:2] if closed else [points[0]] + points + [points[-1]]
     result = []
     for i in range(1, len(points) - 2):
-        a, b, c, d = points[i - 1:i + 3]
+        a, b, c, d = points[i - 1 : i + 3]
         for j in range(steps):
             t = j / steps
-            result.append(0.5 * (2 * b + (-a + c) * t
-                                 + (2*a - 5*b + 4*c - d) * t*t
-                                 + (-a + 3*b - 3*c + d) * t*t*t))
+            result.append(
+                0.5
+                * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t)
+            )
     if not closed:
         result.append(points[-2])
     return result
@@ -92,8 +98,10 @@ def sample(doc, entity, segments=64):
         b = point(entity.p1)
         angle = math.atan2(b.y - a.y, b.x - a.x)
         half = max(4, segments // 2)
-        return (circle_points(b, entity.radius, angle - math.pi/2, math.pi, half, True)
-                + circle_points(a, entity.radius, angle + math.pi/2, math.pi, half, True)), True
+        return (
+            circle_points(b, entity.radius, angle - math.pi / 2, math.pi, half, True)
+            + circle_points(a, entity.radius, angle + math.pi / 2, math.pi, half, True)
+        ), True
     if kind == "SPLINE":
         return _spline([point(i) for i in args["points"]], args["closed"], args["steps"]), args["closed"]
     raise ValueError(f"Unsupported sketch entity {kind}")
@@ -101,12 +109,12 @@ def sample(doc, entity, segments=64):
 
 def join_paths(paths):
     """Join independent sketch lines/arcs as well as entities sharing point IDs."""
-    remaining = [list(p) for p in paths if len(p) > 1]
+    remaining = [(eid, list(p)) for eid, p in paths if len(p) > 1]
     loops = []
     while remaining:
-        chain = remaining.pop(0)
+        first, chain = remaining.pop(0)
         while (chain[-1] - chain[0]).length > 1e-6:
-            for i, path in enumerate(remaining):
+            for i, (_, path) in enumerate(remaining):
                 if (path[0] - chain[-1]).length <= 1e-6:
                     chain.extend(path[1:])
                 elif (path[-1] - chain[-1]).length <= 1e-6:
@@ -118,7 +126,7 @@ def join_paths(paths):
             else:
                 break
         if len(chain) >= 4 and (chain[0] - chain[-1]).length <= 1e-6:
-            loops.append(chain[:-1])
+            loops.append((first, chain[:-1]))
     return loops
 
 
@@ -127,20 +135,26 @@ def paths_and_loops(doc, segments=64):
     for entity in doc.entities:
         args = entity.params
         if entity.etype in {"OFFSET_LOOP", "MIRROR2D"}:
-            profiles = closed + join_paths(paths)
-            index = args["source"]
-            if not 0 <= index < len(profiles):
-                raise ValueError("Referenced profile is missing or open")
-            loop = profiles[index]
+            is_closed = True
+            if "source_entity" in args:
+                _, loop, is_closed = drawing[args["source_entity"]]
+            else:
+                profiles = sorted(closed + join_paths(paths), key=lambda pair: pair[0])
+                index = args["source"]
+                if not 0 <= index < len(profiles):
+                    raise ValueError("Referenced profile is missing or open")
+                loop = profiles[index][1]
             if entity.etype == "OFFSET_LOOP":
                 points = offset_loop(loop, args["distance"])
             else:
                 axis = args["axis"]
-                points = [Vector((v.x, 2*args["offset"] - v.y)) if axis == "X"
-                          else Vector((2*args["offset"] - v.x, v.y)) for v in reversed(loop)]
-            is_closed = True
+                points = [
+                    Vector((v.x, 2 * args["offset"] - v.y)) if axis == "X" else Vector((2 * args["offset"] - v.x, v.y))
+                    for v in reversed(loop)
+                ]
         else:
             points, is_closed = sample(doc, entity, segments)
         drawing.append((entity, points, is_closed))
-        (closed if is_closed else paths).append(points)
-    return drawing, closed + join_paths(paths)
+        (closed if is_closed else paths).append((entity.eid, points))
+    boundaries = sorted(closed + join_paths(paths), key=lambda pair: pair[0])
+    return drawing, [points for _, points in boundaries]

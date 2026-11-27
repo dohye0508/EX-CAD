@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import json
+import math
 import os
 from pathlib import Path
 
 import bmesh
 import bpy
+from mathutils import Matrix, Vector
 
 from excad_addon.ai_bridge import AiBridgeServer
 from excad_addon.sketch_engine import SketchDocument
 from excad_addon.sketch_overlay import constrained_variables
+from excad_addon import feature_geometry
 
 bridge = AiBridgeServer.instance()
 for obj in list(bpy.context.scene.objects):
@@ -40,27 +43,36 @@ def tree(name, sketches, features):
 
 
 sketch()
-run("sketch_arc", points=[[1,0], [0,1], [-1,0]])
-run("sketch_add_line", u0=-1,v0=0,u1=1,v1=0)
+run("sketch_arc", points=[[1, 0], [0, 1], [-1, 0]])
+run("sketch_add_line", u0=-1, v0=0, u1=1, v1=0)
 run("extrude", name="Half", depth=1)
-assert abs(volume("Half")-1.5708) < 0.005
+assert abs(volume("Half") - 1.5708) < 0.005
 sketch()
-run("sketch_arc", center=[0,0], radius=1, start_deg=0, angle_deg=180)
-run("sketch_add_line", u0=-1,v0=0,u1=1,v1=0)
+run("sketch_arc", center=[0, 0], radius=1, start_deg=0, angle_deg=180)
+run("sketch_add_line", u0=-1, v0=0, u1=1, v1=0)
 run("extrude", name="OtherHalf", depth=1, symmetric=True)
-assert abs(volume("Half")-volume("OtherHalf")) < 1e-5
+assert abs(volume("Half") - volume("OtherHalf")) < 1e-5
 sketch()
-run("sketch_regular_polygon", sides=6, radius=0.5, center=[1,0])
+run("sketch_arc", center=[0, 0], radius=1, start_deg=0, angle_deg=180)
+run("sketch_mirror2d", axis="X", source_entity=0)
+run("extrude", name="Two arcs", depth=1)
+assert abs(volume("Two arcs") - 3.14159) < 0.009
+sketch()
+run("sketch_slot", center=[0, 0], angle_deg=45, length=2, width=0.4)
+run("extrude", name="Centered slot", depth=1)
+assert abs(volume("Centered slot") - (1.6 * 0.4 + 3.14159 * 0.2**2)) < 0.001
+sketch()
+run("sketch_regular_polygon", sides=6, radius=0.5, center=[1, 0])
 run("sketch_mirror2d", axis="Y")
 run("extrude", name="Mirrored", depth=0.3)
 assert volume("Mirrored") > 0.35
 sketch()
-run("sketch_add_rect", u0=-1,v0=-1,width=2,height=2)
+run("sketch_add_rect", u0=-1, v0=-1, width=2, height=2)
 run("sketch_offset_loop", distance=-0.2)
 run("extrude", name="Ring", depth=1)
-assert abs(volume("Ring")-(4-1.6**2)) < 1e-5
+assert abs(volume("Ring") - (4 - 1.6**2)) < 1e-5
 sketch()
-run("sketch_spline", points=[[0,0],[0.5,-0.1],[0.8,0.3],[0.1,0.6]], closed=True)
+run("sketch_spline", points=[[0, 0], [0.5, -0.1], [0.8, 0.3], [0.1, 0.6]], closed=True)
 run("extrude", name="Spline", depth=0.2, draft_angle=2)
 assert volume("Spline") > 0.01
 
@@ -69,35 +81,35 @@ for kind in ("MIDPOINT", "SYMMETRIC", "ANGLE", "TANGENT", "CONCENTRIC"):
     d = SketchDocument()
     if kind in {"TANGENT", "CONCENTRIC"}:
         if kind == "TANGENT":
-            d.add_line(-2,0,2,0)
+            d.add_line(-2, 0, 2, 0)
             d.points[0].fixed = d.points[1].fixed = True
-            b = d.add_circle(0,0.7,1)
+            b = d.add_circle(0, 0.7, 1)
         else:
-            d.add_circle(0,0,1)
-            d.points[0].fixed=True
-            b = d.add_circle(0.3,0.1,0.5)
-        d.add_constraint(kind,0,b)
+            d.add_circle(0, 0, 1)
+            d.points[0].fixed = True
+            b = d.add_circle(0.3, 0.1, 0.5)
+        d.add_constraint(kind, 0, b)
     else:
-        for i,p in enumerate(((0.2,0.3),(-1,0),(1,0),(1,1))):
-            d.add_point(*p, fixed=i>0)
-        d.add_constraint(kind,0,1,2,3,value=45)
+        for i, p in enumerate(((0.2, 0.3), (-1, 0), (1, 0), (1, 1))):
+            d.add_point(*p, fixed=i > 0)
+        d.add_constraint(kind, 0, 1, 2, 3, value=45)
     solved, _, residual = d.solve()
     assert solved and residual < 1e-6, (kind, residual)
 
 sketch()
 run("sketch_add_circle", radius=0.5)
 run("sketch_constraint", ctype="FIXED", a=0)
-assert constrained_variables(SketchDocument.active()) == {0,1,2}
+assert constrained_variables(SketchDocument.active()) == {0, 1, 2}
 
-rect = {"shapes":[{"type":"RECT","width":3,"height":1.8}]}
-tree("Housing", {"base":rect}, [{"id":"base","type":"EXTRUDE","sketch":"base","depth":0.65}])
-for side in ("TOP","BOTTOM","FRONT","BACK","LEFT","RIGHT","LARGEST_PLANAR"):
+rect = {"shapes": [{"type": "RECT", "width": 3, "height": 1.8}]}
+tree("Housing", {"base": rect}, [{"id": "base", "type": "EXTRUDE", "sketch": "base", "depth": 0.65}])
+for side in ("TOP", "BOTTOM", "FRONT", "BACK", "LEFT", "RIGHT", "LARGEST_PLANAR"):
     assert run("sketch_on_face", object="Housing", face=side, sketch_id="opening")["plane"] == "FACE"
 run("sketch_on_face", object="Housing", face="TOP", sketch_id="opening")
-run("sketch_slot", start=[-0.65,0], end=[0.65,0], width=0.48)
+run("sketch_slot", start=[-0.65, 0], end=[0.65, 0], width=0.48)
 run("extrude", object="Housing", op="CUT", depth=-0.8)
 v = volume("Housing")
-assert abs(v - (3*1.8 - 1.3*0.48 - 3.14159*0.24**2)*0.65) < 0.001
+assert abs(v - (3 * 1.8 - 1.3 * 0.48 - 3.14159 * 0.24**2) * 0.65) < 0.001
 run("fillet", object="Housing", edges="TOP", radius=0.065)
 run("chamfer", object="Housing", edges="BOTTOM", width=0.035)
 assert volume("Housing") < v
@@ -105,55 +117,112 @@ bpy.context.view_layer.update()
 assert not bpy.data.objects["Housing"].ray_cast((0, 0, 2), (0, 0, -1))[0], "Slot roof obstructs through-cut"
 out = Path(os.getenv("EXCAD_TEST_OUTPUT", bpy.app.tempdir))
 out.mkdir(exist_ok=True, parents=True)
-probe = run("render_inspect", target="Housing", path=str(out/"phase1-cad.png"))
+probe = run("render_inspect", target="Housing", path=str(out / "phase1-cad.png"))
 assert not probe["warnings"], probe
 print("CAD INSPECTION", probe)
-recipe_path = Path(bpy.app.tempdir)/"feature_tree.json"
+recipe_path = Path(bpy.app.tempdir) / "feature_tree.json"
 run("save_feature_tree", object="Housing", path=str(recipe_path))
+assert any(
+    s.get("support", {}).get("object") == "SELF"
+    for s in json.loads(recipe_path.read_text())["sketches"].values()
+    if s.get("support")
+)
 before = volume("Housing")
-run("rebuild_feature_tree", object="Housing", path=str(recipe_path), parameters={"base.depth":0.72})
+run("rebuild_feature_tree", object="Independent housing", path=str(recipe_path))
+assert abs(volume("Independent housing") - before) < 1e-5
+run("rebuild_feature_tree", object="Housing", path=str(recipe_path), parameters={"base.depth": 0.72})
 assert volume("Housing") > before
-bad = bridge._dispatch_dict({"cmd":"rebuild_feature_tree","object":"Housing","parameters":{"base.depth":0}})
+fresh = run(
+    "feature_tree",
+    name="Dimensioned",
+    recipe={
+        "sketches": {"plate": rect},
+        "features": [{"id": "height", "type": "EXTRUDE", "sketch": "plate", "depth": 1}],
+    },
+)
+run(
+    "rebuild_feature_tree", object="Dimensioned", parameters={"sketches.plate.shapes.0.width": 2.0, "height.depth": 0.5}
+)
+assert abs(volume("Dimensioned") - 1.8) < 1e-5
+bad = bridge._dispatch_dict({"cmd": "rebuild_feature_tree", "object": "Housing", "parameters": {"base.depth": 0}})
 assert not bad["ok"] and volume("Housing") > before
 sketch()
-run("sketch_add_rect", u0=0,v0=-1,width=2,height=2)
+run("sketch_add_rect", u0=0, v0=-1, width=2, height=2)
 run("extrude", object="Housing", depth=2, op="INTERSECT")
 assert 0 < volume("Housing") < before
 
-tree("Case", {"base":rect}, [{"type":"EXTRUDE","sketch":"base","depth":1},
-                             {"type":"SHELL","thickness":0.1,"open_faces":["TOP"]}])
+tree(
+    "Case",
+    {"base": rect},
+    [{"type": "EXTRUDE", "sketch": "base", "depth": 1}, {"type": "SHELL", "thickness": 0.1, "open_faces": ["TOP"]}],
+)
 assert 0 < volume("Case") < 2
 sketch("bottom")
 run("sketch_add_circle", radius=0.4)
 sketch("top", offset=1)
 run("sketch_regular_polygon", sides=6, radius=0.65)
-run("loft", name="Vase", sketch_ids=["bottom","top"])
+run("loft", name="Vase", sketch_ids=["bottom", "top"])
 assert volume("Vase") > 0.25
+sections = {
+    f"s{i}": {"offset": i * 0.4, "shapes": [{"type": "RECT", "width": w, "height": w * 0.7}]}
+    for i, w in enumerate((0.4, 1.0, 0.55))
+}
+tree("Smooth transitions", sections, [{"type": "LOFT", "sketch_ids": list(sections), "steps": 5}])
+assert len({round(v.co.z, 4) for v in bpy.data.objects["Smooth transitions"].data.vertices}) == 11
+assert volume("Smooth transitions") > 0.1
 sketch("profile", plane="XZ")
-run("sketch_add_rect", u0=0,v0=0,width=0.7,height=0.35)
+run("sketch_add_rect", u0=0, v0=0, width=0.7, height=0.35)
 run("revolve", name="Dial", axis="Z", angle_deg=270, segments=40)
 assert volume("Dial") > 0.35
 sketch()
 run("sketch_add_circle", radius=0.1)
-curve = bpy.data.curves.new("HandlePath","CURVE")
+curve = bpy.data.curves.new("HandlePath", "CURVE")
 curve.dimensions = "3D"
 sp = curve.splines.new("POLY")
 sp.points.add(3)
-for p,co in zip(sp.points, [(0,0,0),(0,0,0.5),(1,0,0.5),(1,0,0)]):
-    p.co = (*co,1)
+for p, co in zip(sp.points, [(0, 0, 0), (0, 0, 0.5), (1, 0, 0.5), (1, 0, 0)]):
+    p.co = (*co, 1)
 path_obj = bpy.data.objects.new("HandlePath", curve)
 bpy.context.collection.objects.link(path_obj)
 run("sweep", name="Handle", profile_sketch="profile", path_curve=path_obj.name)
 assert volume("Handle") > 0.04
+path = [[1, 0, 0], [0, 1, 0.45], [-1, 0, 0], [0, -1, -0.15], [1, 0, 0]]
+tree(
+    "Closed tube",
+    {"section": {"shapes": [{"type": "CIRCLE", "radius": 0.07}]}},
+    [{"type": "SWEEP", "sketch": "section", "path_curve": path}],
+)
+assert volume("Closed tube") > 0.04
+# Capture which face is currently facing up on a rotated body. The cut keeps
+# that material face after a subsequent motion and regenerates at its new center.
+tree(
+    "Mounted",
+    {"base": {"shapes": [{"type": "RECT", "width": 2, "height": 1}]}},
+    [{"id": "pad", "type": "EXTRUDE", "sketch": "base", "depth": 0.6}],
+)
+mounted = bpy.data.objects["Mounted"]
+mounted.matrix_world = Matrix.Translation((3, 1, 2)) @ Matrix.Rotation(math.pi / 2, 4, "Y")
+run("sketch_on_face", object="Mounted", face="TOP", sketch_id="fixture hole")
+run("sketch_add_circle", radius=0.12)
+run("extrude", object="Mounted", op="CUT", depth=-2.2)
+assert not mounted.ray_cast((-2, 0, 0.3), (1, 0, 0))[0]
+mounted.matrix_world = Matrix.Rotation(0.4, 4, "Z")
+run("rebuild_feature_tree", object="Mounted", parameters={"pad.depth": 0.8})
+assert not mounted.ray_cast((-2, 0, 0.4), (1, 0, 0))[0]
+assert mounted.ray_cast((-2, 0, 0.65), (1, 0, 0))[0]
 sketch()
 run("sketch_add_circle", cu=1, radius=0.10)
 run("extrude", name="Bolts", depth=0.2)
 unit = volume("Bolts")
 run("pattern", object="Bolts", type="CIRCULAR", axis="Z", count=4)
 run("pattern", object="Bolts", type="LINEAR", axis="X", spacing=3, count=2)
-assert abs(volume("Bolts")/unit - 8) < 0.01
+assert abs(volume("Bolts") / unit - 8) < 0.01
+origin = Matrix(feature_geometry.selected_face(bpy.data.objects["Bolts"], "TOP")).translation
+assert any(
+    (origin - Vector((x + dx, y, 0.2))).length < 1e-4 for dx in (0, 3) for x, y in ((1, 0), (0, 1), (-1, 0), (0, -1))
+), origin
 run("mirror3d", object="Bolts", axis="Y", offset=3)
-assert abs(volume("Bolts")/unit - 16) < 0.02
+assert abs(volume("Bolts") / unit - 16) < 0.02
 assert not any(o.name.startswith("EXCAD_Construction") for o in bpy.data.objects)
 assert len(bridge._dispatch('{"cmd":"schema"}').encode()) <= 1200
 print("CAD PASS", bpy.app.version_string)

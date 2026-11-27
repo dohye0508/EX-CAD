@@ -19,7 +19,7 @@ FEATURES = {"EXTRUDE", "REVOLVE", "LOFT", "SWEEP", "FILLET", "CHAMFER", "SHELL",
 SHAPES = {"ARC", "SLOT", "REGULAR_POLYGON", "SPLINE", "OFFSET_LOOP", "MIRROR2D"}
 
 
-def sketch_from_spec(spec, body, owner_name):
+def sketch_from_spec(spec, body, owner_name, model_frame, current_placement):
     if "entities" in spec:
         doc = SketchDocument.deserialize(spec)
     else:
@@ -31,7 +31,7 @@ def sketch_from_spec(spec, body, owner_name):
             if kind == "RECT":
                 width, height = args["width"], args["height"]
                 center = args.get("center", (0, 0))
-                doc.add_rect(center[0]-width/2, center[1]-height/2, width, height)
+                doc.add_rect(center[0] - width / 2, center[1] - height / 2, width, height)
             elif kind == "CIRCLE":
                 doc.add_circle(*args.get("center", (0, 0)), args["radius"])
             elif kind == "LINE":
@@ -42,22 +42,44 @@ def sketch_from_spec(spec, body, owner_name):
             doc.add_constraint(**constraint)
     if doc.support:
         name, side = doc.support["object"], doc.support["face"]
-        target = body if name in {"SELF", owner_name} else bpy.context.scene.objects.get(name)
+        on_body = name in {"SELF", owner_name}
+        target = body if on_body else bpy.context.scene.objects.get(name)
         if target is None:
             raise ValueError(f"Missing support body {name}")
-        doc.frame = geo.selected_face(target, side)
+        if on_body:
+            reference = doc.support.get("reference_frame")
+            placement = Matrix(reference) @ model_frame.inverted() if reference else Matrix.Identity(4)
+            frame = placement.inverted() @ Matrix(geo.selected_face(target, side, placement))
+        else:
+            frame = current_placement.inverted() @ Matrix(geo.selected_face(target, side))
+        doc.frame = [list(row) for row in frame]
     if spec.get("offset"):
-        frame = Matrix(doc.frame) if doc.frame else Matrix((
-            Vector(doc.plane_to_world(1, 0, 0)), Vector(doc.plane_to_world(0, 1, 0)),
-            Vector(doc.plane_to_world(0, 0, 1)))).transposed().to_4x4()
+        frame = (
+            Matrix(doc.frame)
+            if doc.frame
+            else Matrix(
+                (
+                    Vector(doc.plane_to_world(1, 0, 0)),
+                    Vector(doc.plane_to_world(0, 1, 0)),
+                    Vector(doc.plane_to_world(0, 0, 1)),
+                )
+            )
+            .transposed()
+            .to_4x4()
+        )
         frame.translation += float(spec["offset"]) * frame.col[2].xyz
         doc.frame = [list(row) for row in frame]
     return doc
 
 
 def _mesh_copy(objects, source, transform):
-    return geo.new_mesh(objects, [transform @ v.co for v in source.vertices],
-                        [tuple(p.vertices) for p in source.polygons])
+    reflected = transform.to_3x3().determinant() < 0
+    return geo.new_mesh(
+        objects,
+        [transform @ v.co for v in source.vertices],
+        [tuple(reversed(p.vertices[:])) if reflected else tuple(p.vertices) for p in source.polygons],
+        orient=False,
+    )
 
 
 def _pattern(objects, body, feature):
@@ -74,9 +96,12 @@ def _pattern(objects, body, feature):
                 matrix = Matrix.Translation(axis * (float(feature.get("spacing", 1)) * i))
             elif kind == "CIRCULAR":
                 angle = float(feature.get("angle_deg", 360))
-                divisor = count if abs(angle) == 360 else count-1
-                matrix = (Matrix.Translation(pivot) @ Matrix.Rotation(math.radians(angle)*i/divisor, 4, axis)
-                          @ Matrix.Translation(-pivot))
+                divisor = count if abs(angle) == 360 else count - 1
+                matrix = (
+                    Matrix.Translation(pivot)
+                    @ Matrix.Rotation(math.radians(angle) * i / divisor, 4, axis)
+                    @ Matrix.Translation(-pivot)
+                )
             else:
                 raise ValueError("Pattern type must be LINEAR or CIRCULAR")
             geo.boolean(body, _mesh_copy(objects, original, matrix), "ADD")
@@ -110,8 +135,11 @@ class FeatureTree:
             self.recipe = {"version": 1, "sketches": {}, "features": []}
             if self.owner:
                 mesh, matrix = self.owner.data, self.owner.matrix_world
-                self.recipe["base"] = {"vertices": [list(matrix @ v.co) for v in mesh.vertices],
-                                       "faces": [list(p.vertices) for p in mesh.polygons]}
+                reflected = matrix.to_3x3().determinant() < 0
+                self.recipe["base"] = {
+                    "vertices": [list(matrix @ v.co) for v in mesh.vertices],
+                    "faces": [list(reversed(p.vertices[:])) if reflected else list(p.vertices) for p in mesh.polygons],
+                }
                 self.recipe["model_frame"] = [list(row) for row in matrix]
         if self.recipe.get("version", 1) != 1:
             raise ValueError("Unsupported feature tree version")
@@ -124,15 +152,17 @@ class FeatureTree:
         ids = feature.get("sketch_ids", []) if kind == "LOFT" else [feature["sketch"]] if "sketch" in feature else []
         for name in ids:
             record = bpy.context.scene.get("excad_sketches", {}).get(name)
+            spec = json.loads(record) if record else None
+            if spec and spec.get("support") and spec["support"]["object"] == self.name:
+                spec["support"]["object"] = "SELF"
             if name not in self.recipe["sketches"]:
                 if not record:
                     raise ValueError(f"Unknown sketch {name}")
-                self.recipe["sketches"][name] = json.loads(record)
+                self.recipe["sketches"][name] = spec
             elif record and name == sketch:
                 # A reset of the unnamed active sketch must not redefine an earlier feature.
-                spec = json.loads(record)
                 if spec != self.recipe["sketches"][name]:
-                    new_name = f"{name}@{len(self.recipe['features'])+1}"
+                    new_name = f"{name}@{len(self.recipe['features']) + 1}"
                     self.recipe["sketches"][new_name] = spec
                     if kind == "LOFT":
                         feature["sketch_ids"] = [new_name if n == name else n for n in ids]
@@ -140,34 +170,57 @@ class FeatureTree:
                         feature["sketch"] = new_name
         if kind == "SWEEP" and isinstance(feature.get("path_curve"), str):
             feature["path_curve"] = [list(p) for p in geo.path_points(feature["path_curve"])]
-        feature.setdefault("id", f"F{len(self.recipe['features'])+1}")
+        feature.setdefault("id", f"F{len(self.recipe['features']) + 1}")
         self.recipe["features"].append(feature)
 
     def rebuild(self):
         recipe = self.recipe
         sketches = recipe.get("sketches", {})
+        model_frame = Matrix(recipe["model_frame"]) if "model_frame" in recipe else Matrix.Identity(4)
+        current_placement = self.owner.matrix_world @ model_frame.inverted() if self.owner else Matrix.Identity(4)
         with geo.construction() as objects:
             base = recipe.get("base")
-            body = geo.new_mesh(objects, base["vertices"], base["faces"]) if base else None
+            body = geo.new_mesh(objects, base["vertices"], base["faces"], orient=False) if base else None
             for i, feature in enumerate(recipe["features"]):
                 kind = feature["type"].upper()
                 try:
                     if kind in {"EXTRUDE", "REVOLVE", "SWEEP", "LOFT"}:
                         ids = feature["sketch_ids"] if kind == "LOFT" else [feature["sketch"]]
-                        docs = [sketch_from_spec(sketches[key], body, self.name) for key in ids]
+                        docs = [
+                            sketch_from_spec(sketches[key], body, self.name, model_frame, current_placement)
+                            for key in ids
+                        ]
                         if kind == "EXTRUDE":
                             # Overlap the supporting face by a few mesh-coordinate ULPs.
                             # A microscopically recessed cutter otherwise leaves a zero-thickness lid.
                             overlap = 0
                             if body and docs[0].support:
                                 overlap = max(max(body.dimensions), abs(feature["depth"]), 1e-3) * 2e-6
-                            tool = geo.extrude(objects, docs[0], feature["depth"], feature.get("symmetric", False),
-                                               feature.get("draft_angle", 0), overlap)
+                            tool = geo.extrude(
+                                objects,
+                                docs[0],
+                                feature["depth"],
+                                feature.get("symmetric", False),
+                                feature.get("draft_angle", 0),
+                                overlap,
+                            )
                         elif kind == "REVOLVE":
-                            tool = geo.revolve(objects, docs[0], feature.get("axis"), feature.get("angle_deg", 360),
-                                               feature.get("segments", 64), feature.get("origin"))
+                            tool = geo.revolve(
+                                objects,
+                                docs[0],
+                                feature.get("axis"),
+                                feature.get("angle_deg", 360),
+                                feature.get("segments", 64),
+                                feature.get("origin"),
+                            )
                         elif kind == "LOFT":
-                            tool = geo.loft(objects, docs, feature.get("segments", 64))
+                            tool = geo.loft(
+                                objects,
+                                docs,
+                                feature.get("segments", 64),
+                                feature.get("interpolation", "SMOOTH"),
+                                feature.get("steps", 4),
+                            )
                         else:
                             tool = geo.sweep(objects, docs[0], feature["path_curve"])
                         op = feature.get("op", "ADD").upper()
@@ -181,8 +234,12 @@ class FeatureTree:
                         raise ValueError("Feature requires a base solid")
                     elif kind in {"FILLET", "CHAMFER"}:
                         width = feature["radius"] if kind == "FILLET" else feature["width"]
-                        geo.finish_edges(body, feature.get("edges", "ALL"), width,
-                                         feature.get("segments", 5) if kind == "FILLET" else 1)
+                        geo.finish_edges(
+                            body,
+                            feature.get("edges", "ALL"),
+                            width,
+                            feature.get("segments", 5) if kind == "FILLET" else 1,
+                        )
                     elif kind == "SHELL":
                         geo.shell(body, feature["thickness"], feature.get("open_faces", ["TOP"]))
                     elif kind == "PATTERN":
@@ -192,24 +249,27 @@ class FeatureTree:
                         mirror = Matrix.Identity(3)
                         for row in range(3):
                             for col in range(3):
-                                mirror[row][col] -= 2*axis[row]*axis[col]
+                                mirror[row][col] -= 2 * axis[row] * axis[col]
                         matrix = mirror.to_4x4()
-                        matrix.translation = 2*float(feature.get("offset", 0))*axis
+                        matrix.translation = 2 * float(feature.get("offset", 0)) * axis
                         geo.boolean(body, _mesh_copy(objects, body.data, matrix), "ADD")
                     else:
                         raise ValueError(f"Unknown feature {kind}")
                     _solid(body.data)
                 except (KeyError, IndexError, ValueError, RuntimeError) as exc:
-                    raise ValueError(f"Feature {feature.get('id', i+1)} ({kind}): {exc}") from exc
+                    raise ValueError(f"Feature {feature.get('id', i + 1)} ({kind}): {exc}") from exc
             if body is None:
                 raise ValueError("Feature tree is empty")
             raw = json.dumps(recipe, separators=(",", ":"), allow_nan=False)
             result = body.data.copy()
             if "model_frame" in recipe:
-                result.transform(Matrix(recipe["model_frame"]).inverted())
+                result.transform(model_frame.inverted())
+                if model_frame.to_3x3().determinant() < 0:
+                    result.flip_normals()
             if self.owner is None:
                 self.owner = bpy.data.objects.new(self.name, result)
                 bpy.context.collection.objects.link(self.owner)
+                self.owner.matrix_world = model_frame
             else:
                 old = self.owner.data
                 for material in old.materials:
@@ -228,6 +288,9 @@ def save_recipe(obj, path):
     path = Path(bpy.path.abspath(path)).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = json.loads(obj["excad_tree"])
+    for sketch in raw.get("sketches", {}).values():
+        if sketch.get("support") and sketch["support"]["object"] == obj.name:
+            sketch["support"]["object"] = "SELF"
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf8", dir=path.parent, delete=False) as f:
         temp = f.name
         try:
@@ -252,7 +315,14 @@ def dispatch(cmd, data):
         bpy.context.scene["excad_active_sketch"] = args.get("sketch_id", "Sketch")
         doc = SketchDocument.active()
         doc.reset("FACE")
-        doc.frame, doc.support = frame, {"object": name, "face": face}
+        doc.frame, doc.support = (
+            frame,
+            {
+                "object": name,
+                "face": face,
+                "reference_frame": [list(row) for row in bpy.context.scene.objects[name].matrix_world],
+            },
+        )
         doc.save()
         return {"plane": doc.plane, "frame": frame}
     if cmd == "sketch_constraint":
@@ -264,7 +334,8 @@ def dispatch(cmd, data):
         if not name:
             name = doc.support["object"] if doc.support else "Body1"
         if cmd == "save_feature_tree":
-            path = args.get("path") or str(Path(bpy.data.filepath or bpy.app.tempdir).parent / "feature_tree.json")
+            directory = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(bpy.app.tempdir)
+            path = args.get("path") or str(directory / "feature_tree.json")
             return {"path": save_recipe(bpy.context.scene.objects[name], path)}
         recipe = args.pop("recipe", None)
         if "path" in args:
@@ -275,12 +346,29 @@ def dispatch(cmd, data):
                 args["pattern_type"] = args.pop("type")
             tree.append(cmd.upper(), args)
         for key, value in args.get("parameters", {}).items():
+            if key.startswith("sketches."):
+                parts = key.split(".")
+                if len(parts) < 5 or parts[2] not in {"shapes", "points", "entities", "constraints"}:
+                    raise ValueError(f"Invalid sketch dimension {key}")
+                entry = tree.recipe["sketches"][parts[1]]
+                for field in parts[2:-1]:
+                    entry = entry[int(field)] if isinstance(entry, list) else entry[field]
+                field = int(parts[-1]) if isinstance(entry, list) else parts[-1]
+                previous = entry[field]
+                if type(previous) not in {int, float} or type(value) not in {int, float} or not math.isfinite(value):
+                    raise ValueError(f"Expected a numeric sketch dimension for {key}")
+                entry[field] = value
+                continue
             feature_id, field = key.split(".", 1)
             matches = [f for f in tree.recipe["features"] if f.get("id") == feature_id]
             if len(matches) != 1 or field not in matches[0] or field in {"type", "id"}:
                 raise ValueError(f"Unknown feature parameter {key}")
             matches[0][field] = value
         obj = tree.rebuild()
-        return {"name": obj.name, "features": len(tree.recipe["features"]), "verts": len(obj.data.vertices),
-                "faces": len(obj.data.polygons)}
+        return {
+            "name": obj.name,
+            "features": len(tree.recipe["features"]),
+            "verts": len(obj.data.vertices),
+            "faces": len(obj.data.polygons),
+        }
     return None

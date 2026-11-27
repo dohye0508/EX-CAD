@@ -126,6 +126,15 @@ class SketchDocument:
             p0 = point(args.get("center", (0, 0)))
         elif kind == "SLOT":
             radius = float(args["width"]) / 2
+            if "length" in args:
+                # Length is the overall end-to-end slot dimension, as on a drawing.
+                span = float(args["length"]) - 2*radius
+                if span <= 0:
+                    raise ValueError("Slot length must exceed its width")
+                angle = math.radians(args.get("angle_deg",0))
+                delta = Vector((math.cos(angle),math.sin(angle)))*(span/2)
+                center = Vector(args.get("center",(0,0)))
+                args["start"],args["end"] = center-delta,center+delta
             if radius <= 0 or (Vector(args["end"]) - Vector(args["start"])).length < 1e-7:
                 raise ValueError("Slot needs distinct endpoints and positive width")
             p0, p1 = point(args["start"]), point(args["end"])
@@ -139,10 +148,16 @@ class SketchDocument:
             p0 = params["points"][0]
         elif kind in {"OFFSET_LOOP", "MIRROR2D"}:
             source = int(args.get("source", 0))
-            loops = self.build_2d_loops()
-            if not 0 <= source < len(loops):
-                raise ValueError("Source must refer to a closed profile")
-            params = {"source": source}
+            if kind=="MIRROR2D" and "source_entity" in args:
+                index = int(args["source_entity"])
+                if not 0 <= index < len(self.entities):
+                    raise ValueError("Unknown entity to mirror")
+                params = {"source_entity":index}
+            else:
+                loops = self.build_2d_loops()
+                if not 0 <= source < len(loops):
+                    raise ValueError("Source must refer to a closed profile")
+                params = {"source": source}
             if kind == "OFFSET_LOOP":
                 params["distance"] = float(args["distance"])
                 sketch_profiles.offset_loop(loops[source], params["distance"])
