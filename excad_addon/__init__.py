@@ -694,6 +694,7 @@ class EXCAD_OT_sketch_new(Operator):
 
     def execute(self, context):
         sketch_engine.SketchDocument.active().reset(self.plane)
+        sketch_engine.SketchDocument.active().save()
         self.report({'INFO'}, f"EX-CAD: Started new {self.plane} sketch")
         return {'FINISHED'}
 
@@ -713,6 +714,7 @@ class EXCAD_OT_sketch_add_rect(Operator):
 
     def execute(self, context):
         sketch_engine.SketchDocument.active().add_rect(self.u0, self.v0, self.width, self.height)
+        sketch_engine.SketchDocument.active().save()
         return {'FINISHED'}
 
 
@@ -730,6 +732,7 @@ class EXCAD_OT_sketch_add_circle(Operator):
 
     def execute(self, context):
         sketch_engine.SketchDocument.active().add_circle(self.cu, self.cv, self.radius)
+        sketch_engine.SketchDocument.active().save()
         return {'FINISHED'}
 
 
@@ -748,6 +751,7 @@ class EXCAD_OT_sketch_add_line(Operator):
 
     def execute(self, context):
         sketch_engine.SketchDocument.active().add_line(self.u0, self.v0, self.u1, self.v1)
+        sketch_engine.SketchDocument.active().save()
         return {'FINISHED'}
 
 
@@ -758,6 +762,7 @@ class EXCAD_OT_sketch_solve(Operator):
 
     def execute(self, context):
         conv, iters, res = sketch_engine.SketchDocument.active().solve()
+        sketch_engine.SketchDocument.active().save()
         self.report({'INFO'}, f"EX-CAD Solve: {'converged' if conv else 'max iters'} ({iters} iters, res={res:.2e})")
         return {'FINISHED'}
 
@@ -1086,6 +1091,8 @@ def _auto_start_bridge():
 
 
 def register():
+    from . import sketch_overlay
+    sketch_overlay.register()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.excad = PointerProperty(type=EXCADSceneProps)
@@ -1093,6 +1100,8 @@ def register():
 
 
 def unregister():
+    from . import sketch_overlay
+    sketch_overlay.unregister()
     ai_bridge.AiBridgeServer.instance().stop()
     if hasattr(bpy.types.Scene, "excad"):
         del bpy.types.Scene.excad

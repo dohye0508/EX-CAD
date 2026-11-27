@@ -11,6 +11,7 @@ import threading
 
 import bpy
 from .protocol import dsl_lines, json_command
+from . import feature_tree
 
 from . import asset_fetcher, character_stylizer, city_generator, human_engine, image_sketch_engine, oneshot_generators, polyhedron_engine, sketch_engine
 
@@ -24,7 +25,10 @@ COMPACT_SCHEMA = (
     "dsl{code:'command {JSON args};command {JSON args}'}; scene_digest{since_hash?}. "
     "Shortcuts: S plane; R u v w h; C u v r; L u v u v; SOLVE; EX depth sym name; "
     "RV deg segments name; H preset; IMG front; POLY faces dir; FIND/USE query; "
-    "STAGE; POSE name; PART type size; PROP type scale; STUDIO; CITY; STYLE; DIGEST."
+    "STAGE; POSE name; PART type size; PROP type scale; STUDIO; CITY; STYLE; DIGEST. "
+    "CAD: sketch_new/on_face/constraint, sketch_{arc,slot,regular_polygon,spline,offset_loop,mirror2d}; "
+    "extrude/revolve/loft/sweep/fillet/chamfer/shell/pattern/mirror3d; "
+    "feature_tree{name,recipe}, save_feature_tree/rebuild_feature_tree. render_inspect{target?,views?}."
 )
 
 _POLY_MAP = {
@@ -231,13 +235,19 @@ class AiBridgeServer:
         try:
             if not isinstance(data, dict):
                 raise ValueError("Expected a command object")
-            return self._execute(data)
+            result = self._execute(data)
+            if result.get("ok") and data.get("cmd", "").startswith("sketch_"):
+                sketch_engine.SketchDocument.active().save()
+            return result
         except (KeyError, TypeError, IndexError, ValueError, RuntimeError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
 
     def _execute(self, data: dict) -> dict:
         cmd = data.get("cmd", "")
         doc = sketch_engine.SketchDocument.active()
+        if cmd == "render_inspect":
+            from .inspection import render_inspect
+            return {"ok": True, **render_inspect(**{k: v for k, v in data.items() if k != "cmd"})}
 
         if cmd == "schema":
             return {"ok": True, "schema": COMPACT_SCHEMA}
@@ -560,7 +570,17 @@ class AiBridgeServer:
 
         if cmd == "sketch_new":
             plane = data.get("plane", "XY")
+            if plane not in {"XY", "XZ", "YZ"}:
+                raise ValueError("Sketch plane must be XY, XZ or YZ")
+            bpy.context.scene["excad_active_sketch"] = data.get("sketch_id", "Sketch")
+            doc = sketch_engine.SketchDocument.active()
             doc.reset(plane)
+            if "offset" in data:
+                from mathutils import Matrix, Vector
+                frame = Matrix(tuple(Vector(doc.plane_to_world(*axes))
+                                     for axes in ((1,0,0), (0,1,0), (0,0,1)))).transposed().to_4x4()
+                frame.translation = frame.col[2].xyz * float(data["offset"])
+                doc.frame = [list(row) for row in frame]
             return {"ok": True, "plane": plane}
         if cmd == "sketch_add_rect":
             doc.add_rect(
@@ -580,6 +600,9 @@ class AiBridgeServer:
         if cmd == "sketch_solve":
             conv, iters, res = doc.solve()
             return {"ok": True, "converged": conv, "iterations": iters, "max_residual": res}
+        if cmd in {"sketch_extrude", "sketch_revolve"} and (
+                doc.support or any(k in data for k in ("object", "draft_angle", "axis", "op", "sketch"))):
+            return {"ok": True, **feature_tree.dispatch(cmd[7:], data)}
         if cmd == "sketch_extrude":
             doc.solve()
             obj = sketch_engine.extrude_sketch_doc(
@@ -599,6 +622,9 @@ class AiBridgeServer:
                 return {"ok": False, "error": "No closed sketch profile to revolve"}
             return {"ok": True, "verts": len(obj.data.vertices), "faces": len(obj.data.polygons)}
 
+        result = feature_tree.dispatch(cmd, data)
+        if result is not None:
+            return {"ok": True, **result}
         return {"ok": False, "error": f"Unknown command: {cmd}"}
 
     def _server_loop(self):
