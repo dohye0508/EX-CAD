@@ -1,0 +1,4 @@
+# Runtime: none outside Blender. The engine uses Blender's bundled Python (bpy, numpy, mathutils, bmesh, openvdb).
+# The MCP server (bnm_mcp/server.py) uses only the Python standard library (Python >= 3.10).
+# Optional (not installed here, only used if present): torch, pytorch3d / nvdiffrast (differentiable rendering),
+# mediapipe (face landmarks). ffmpeg on PATH for video frame extraction.

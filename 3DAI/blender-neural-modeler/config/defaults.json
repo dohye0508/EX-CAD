@@ -1,0 +1,8 @@
+{
+  "mode": "SCRATCH_SCULPT",
+  "coordinate_frame": {"up": "Z", "face_toward": "-Y", "model_left": "+X", "head_height": 2.0},
+  "brush": {"brush": "CLAY_STRIPS", "radius": 0.08, "strength": 0.4, "falloff": "SMOOTH", "pressure": "taper"},
+  "render": {"size": 320, "views": ["front", "left", "three_quarter_left"], "modes": ["clay"]},
+  "feedback": {"max_iterations": 8, "max_seconds": 900, "reject_if_worse": true, "gain_halving_floor": 0.12},
+  "planner": {"max_leak_fraction": 0.35, "rollback_on_failure": true}
+}

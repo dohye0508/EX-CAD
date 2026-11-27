@@ -1,0 +1,6 @@
+{
+  "draft":    {"blocking_vertices": 10242, "primary_voxel": 0.025, "detail_voxel": 0.014, "render_size": 256},
+  "standard": {"blocking_vertices": 10242, "primary_voxel": 0.02,  "detail_voxel": 0.0105, "render_size": 320},
+  "high":     {"blocking_vertices": 40962, "primary_voxel": 0.016, "detail_voxel": 0.007, "render_size": 512},
+  "note": "vertex counts are guidelines; increase only after the forms at the current density are right"
+}

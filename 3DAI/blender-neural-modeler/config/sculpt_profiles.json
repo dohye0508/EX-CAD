@@ -1,0 +1,6 @@
+{
+  "blocking":  {"radius": [0.15, 0.3],  "brushes": ["ELASTIC_DEFORM", "GRAB", "SNAKE_HOOK", "POSE"], "strength": [0.8, 1.0]},
+  "primary":   {"radius": [0.06, 0.15], "brushes": ["CLAY", "CLAY_STRIPS", "FLATTEN", "DRAW_SUBTRACT", "SURFACE_SMOOTH"], "strength": [0.3, 0.6]},
+  "secondary": {"radius": [0.02, 0.06], "brushes": ["CLAY_STRIPS", "INFLATE", "CREASE", "PINCH", "GRAB", "RELAX"], "strength": [0.25, 0.6]},
+  "tertiary":  {"radius": [0.005, 0.02], "brushes": ["CREASE", "DRAW_SHARP", "PINCH"], "strength": [0.08, 0.25]}
+}

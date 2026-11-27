@@ -29,6 +29,7 @@
 #include "ED_curve.hh"
 #include "ED_curves.hh"
 #include "ED_curves_sculpt.hh"
+#include "ED_excad.hh"
 #include "ED_fileselect.hh"
 #include "ED_geometry.hh"
 #include "ED_gizmo_library.hh"
@@ -103,6 +104,7 @@ void ED_spacetypes_init()
   object::operatortypes_object();
   ED_operatortypes_lattice();
   ED_operatortypes_mesh();
+  excad::operatortypes_excad();
   geometry::operatortypes_geometry();
   sculpt_paint::operatortypes_sculpt();
   ED_operatortypes_sculpt_curves();

@@ -1,0 +1,12 @@
+[project]
+name = "blender-neural-modeler"
+version = "0.1.0"
+description = "Autonomous scratch sculpting engine and MCP tools for Blender"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+bnm-mcp = "bnm_mcp.server:main"
+
+[tool.setuptools]
+packages = ["bnm", "bnm_mcp"]
