@@ -390,7 +390,9 @@ def _separated_along_z(upper, lower, eps):
     if upper is None or lower is None:
         return True
     lift = float(lower.bounds[1, 2] - upper.bounds[0, 2])
-    clearance = vertical_clearance(upper, lower, (0, 0, lift), best=lift + 2 * eps)
+    if lift <= eps:
+        return True
+    clearance = vertical_clearance(upper, lower, (0, 0, lift), best=lift + 2 * eps, stop_at=lift - 2 * eps)
     return clearance >= lift - eps
 
 
@@ -440,7 +442,7 @@ def assembly_root(obj):
     return obj
 
 
-def _project_vertices(subject, other, shift, sign, best):
+def _project_vertices(subject, other, shift, sign, best, stop_at):
     """Measure vertical separation at projected vertices, in the other mesh's space."""
     points = subject.points + shift
     inside = np.all(
@@ -457,7 +459,7 @@ def _project_vertices(subject, other, shift, sign, best):
         hit = other.bvh.ray_cast(Vector((point[0], point[1], origin_z)), ray)[0]
         if hit is not None:
             best = min(best, -sign * float(point[2] - hit.z))
-            if best <= 1e-6:
+            if best <= stop_at:
                 break
     return best
 
@@ -478,11 +480,12 @@ def _project_edges(surface, shift, limit, bottom, low_xy, high_xy):
     return surface.points[pairs] + shift
 
 
-def vertical_clearance(upper, lower, shift=(0, 0, 0), best=float("inf")):
+def vertical_clearance(upper, lower, shift=(0, 0, 0), best=float("inf"), *, stop_at=1e-6):
     """First contact distance when moving a translated upper mesh straight down.
 
     Over each pair of projected triangles the difference in height is linear.
     Its minimum is at a projected vertex or at the intersection of two edges.
+    A caller checking separation can stop once any clearance proves penetration.
     """
     shift = np.asarray(shift, dtype=np.float64)
     lo, hi = upper.bounds + shift
@@ -492,10 +495,10 @@ def vertical_clearance(upper, lower, shift=(0, 0, 0), best=float("inf")):
         or np.any(lo[:2] > lower.bounds[1, :2])
     ):
         return best
-    best = _project_vertices(upper, lower, shift, -1, best)
-    if best > 1e-6:
-        best = _project_vertices(lower, upper, -shift, 1, best)
-    if best <= 1e-6:
+    best = _project_vertices(upper, lower, shift, -1, best, stop_at)
+    if best > stop_at:
+        best = _project_vertices(lower, upper, -shift, 1, best, stop_at)
+    if best <= stop_at:
         return best
     low_xy = np.maximum(lo[:2], lower.bounds[0, :2]) - 1e-6
     high_xy = np.minimum(hi[:2], lower.bounds[1, :2]) + 1e-6
@@ -527,7 +530,7 @@ def vertical_clearance(upper, lower, shift=(0, 0, 0), best=float("inf")):
         if np.any(valid):
             distance = sign * (a[2] + t * r[2] - start[:, 2] - u * s[:, 2])
             best = min(best, float(distance[valid].min()))
-            if best <= 1e-6:
+            if best <= stop_at:
                 break
     return best
 
