@@ -4,27 +4,12 @@
 bl_info = {
     "name": "EX-CAD Studio",
     "author": "EX-CAD Authors",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > EX-CAD",
     "description": "Studio Human Generator (MPFB2), External Git/URL Asset Fetcher, Parametric Sketch, and AI Direct Bridge",
     "category": "3D View",
 }
-
-if "bpy" in locals():
-    import importlib
-    for _mod in (
-        sketch_engine,
-        human_engine,
-        asset_fetcher,
-        image_sketch_engine,
-        polyhedron_engine,
-        oneshot_generators,
-        character_stylizer,
-        city_generator,
-        ai_bridge,
-    ):
-        importlib.reload(_mod)
 
 import bpy
 from bpy.props import (
@@ -1113,10 +1098,13 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.excad = PointerProperty(type=EXCADSceneProps)
-    bpy.app.timers.register(_auto_start_bridge, first_interval=0.5)
+    if not bpy.app.background:
+        bpy.app.timers.register(_auto_start_bridge, first_interval=0.5)
 
 
 def unregister():
+    if bpy.app.timers.is_registered(_auto_start_bridge):
+        bpy.app.timers.unregister(_auto_start_bridge)
     from . import sketch_overlay
     sketch_overlay.unregister()
     ai_bridge.AiBridgeServer.instance().stop()
@@ -1124,3 +1112,34 @@ def unregister():
         del bpy.types.Scene.excad
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
+
+
+def reload_addon(server):
+    """Replace registered classes and dispatch code while retaining the listening socket."""
+    import importlib
+    import sys
+    from . import sketch_overlay
+    registered = hasattr(bpy.types.Scene, "excad")
+    if registered:
+        sketch_overlay.unregister()
+        del bpy.types.Scene.excad
+        for cls in reversed(CLASSES):
+            bpy.utils.unregister_class(cls)
+    modules = ("protocol", "sketch_profiles", "sketch_engine", "feature_geometry", "feature_tree",
+               "human_engine", "asset_fetcher", "polyhedron_engine", "image_sketch_engine",
+               "character_stylizer", "face_fit", "human_assets", "wardrobe", "oneshot_generators",
+               "city_generator", "scene_mesh", "inspection", "uv_bake", "sdf_engine", "ai_3d_provider",
+               "scene_layout", "appearance", "scene_history", "scene_state", "sketch_overlay", "ai_bridge")
+    importlib.invalidate_caches()
+    for name in modules:
+        module = sys.modules.get(__name__+"."+name)
+        if module:
+            importlib.reload(module)
+    package = importlib.reload(sys.modules[__name__])
+    server.__class__ = package.ai_bridge.AiBridgeServer
+    package.ai_bridge.AiBridgeServer._instance = server
+    if registered:
+        for cls in package.CLASSES:
+            bpy.utils.register_class(cls)
+        bpy.types.Scene.excad = PointerProperty(type=package.EXCADSceneProps)
+        sketch_overlay.register()

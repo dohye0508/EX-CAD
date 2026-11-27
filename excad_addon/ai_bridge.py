@@ -8,12 +8,23 @@ import queue
 import shlex
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import bpy
 from .protocol import dsl_lines, json_command
-from . import feature_tree
+from . import appearance, feature_tree, scene_layout, scene_state
+from .scene_history import SceneHistory
 
 from . import asset_fetcher, character_stylizer, city_generator, human_engine, image_sketch_engine, oneshot_generators, polyhedron_engine, sketch_engine
+
+
+def _discard_download(future):
+    if not future.cancelled() and future.exception() is None:
+        from pathlib import Path
+        path = future.result()
+        if isinstance(path, Path) and path.suffix == ".glb":
+            path.unlink(missing_ok=True)
 
 
 def _jdump(obj: dict) -> str:
@@ -30,7 +41,9 @@ COMPACT_SCHEMA = (
     "extrude/revolve/loft/sweep/fillet/chamfer/shell/pattern/mirror3d; "
     "feature_tree{name,recipe}, save_feature_tree/rebuild_feature_tree. render_inspect{target?,views?}. "
     "Portrait: fit_face_from_image{object,image_path}, character_stylize{object,hair?,clothes?,skin?,expression?,hands?}, "
-    "install_asset_pack/equip_asset."
+    "install_asset_pack/equip_asset. SDF: sdf_generate{tree,resolution?}; poly_reconstruct/poly_bake; "
+    "generate_3d{prompt?,image_path?,provider}. Layout: place_relative/look_at/scatter_on_surface/"
+    "check_intersections/resolve_overlaps; set_material/light_studio; checkpoint/rollback{name}, undo, reload_addon."
 )
 
 _POLY_MAP = {
@@ -41,12 +54,26 @@ _POLY_MAP = {
 }
 
 
+READ_ONLY = {"ping", "schema", "list", "scene_digest", "render_inspect", "check_intersections",
+             "human_list_targets", "asset_search", "asset_list_cached", "install_asset_pack", "save_feature_tree"}
+LAYOUT = {fn.__name__: fn for fn in (scene_layout.place_relative, scene_layout.look_at,
+          scene_layout.scatter_on_surface, scene_layout.check_intersections, scene_layout.resolve_overlaps,
+          appearance.set_material, appearance.light_studio)}
+
+
 class AiBridgeServer:
     _instance = None
 
     def __init__(self):
         self.running = False
         self.port = 9877
+        self._socket = None
+        self._poll_callback = lambda: self._timer_poll()
+        self._pending = None
+        self._pool = None
+        self._remembered = False
+        self.history = SceneHistory()
+        self._sketch_cache = {}
         self._thread = None
         self._queue: queue.Queue = queue.Queue()
         self._digest_cache: dict[str, dict[str, list]] = {}
@@ -60,230 +87,271 @@ class AiBridgeServer:
     def start(self, port: int = 9877):
         if self.running:
             return True
-        self.port = port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            sock.listen(8)
+            sock.settimeout(0.2)
+        except OSError:
+            sock.close()
+            raise
+        self.port = sock.getsockname()[1]
+        self._socket = sock
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="EXCAD IO")
         self.running = True
-        self._thread = threading.Thread(target=self._server_loop, daemon=True)
+        self._thread = threading.Thread(target=self._server_loop, args=(sock,), daemon=True)
         self._thread.start()
-        if not bpy.app.timers.is_registered(self._timer_poll):
-            bpy.app.timers.register(self._timer_poll, first_interval=0.05)
+        if not bpy.app.timers.is_registered(self._poll_callback):
+            bpy.app.timers.register(self._poll_callback, first_interval=0.02, persistent=True)
         return True
 
     def stop(self):
         self.running = False
+        if self._pending:
+            program, future, holder, event = self._pending
+            program.close()
+            if not future.cancel():
+                future.add_done_callback(_discard_download)
+            holder["resp"] = _jdump({"ok":False,"error":"Bridge stopped"})
+            event.set()
+            self._pending = None
+        if self._pool:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+        if self._socket:
+            self._socket.close()
+            self._socket = None
+        if bpy.app.timers.is_registered(self._poll_callback):
+            bpy.app.timers.unregister(self._poll_callback)
 
     def _timer_poll(self):
-        while not self._queue.empty():
-            payload, holder, evt = self._queue.get_nowait()
+        if self._pending:
+            program, future, holder, event = self._pending
+            if not future.done():
+                return 0.02
+            self._pending = None
+        elif not self._queue.empty():
+            payload, holder, event = self._queue.get_nowait()
             try:
-                holder["resp"] = self._dispatch(payload)
-            except Exception as exc:
+                data = json.loads(payload)
+            except ValueError as exc:
                 holder["resp"] = _jdump({"ok": False, "error": str(exc)})
-            finally:
-                evt.set()
-        return 0.05 if self.running else None
+                event.set()
+                return 0.02
+            self._remembered = False
+            program, future = self._steps(data), None
+        else:
+            return 0.02 if self.running else None
+        try:
+            if future is None:
+                action = next(program)
+            elif future.exception() is not None:
+                action = program.throw(future.exception())
+            else:
+                action = program.send(future.result())
+            self._pending = program, self._pool.submit(action), holder, event
+        except StopIteration as done:
+            holder["resp"] = _jdump(done.value)
+            event.set()
+        except Exception as exc:
+            holder["resp"] = _jdump({"ok": False, "error": str(exc)})
+            event.set()
+        return 0.02 if self.running else None
 
-    def _build_digest(self, include_all: bool = False) -> tuple[str, list]:
-        rows = []
-        for o in sorted(bpy.data.objects, key=lambda x: x.name):
-            if not include_all and o.type in ('CAMERA', 'LIGHT'):
-                continue
-            verts = len(o.data.vertices) if o.type == 'MESH' else 0
-            faces = len(o.data.polygons) if o.type == 'MESH' else 0
-            loc = [round(float(v), 3) for v in o.location]
-            dim = [round(float(v), 3) for v in o.dimensions]
-            rows.append([o.name, o.type[0], verts, faces, loc, dim])
-        raw = _jdump({"o": rows})
-        h = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
-        return h, rows
+    def _build_digest(self, include_all: bool = False):
+        rows, sketch = scene_state.rows(include_all)
+        raw = _jdump({"o": rows, "s": sketch})
+        h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return h, rows, sketch
 
-    def _run_dsl_line(self, line: str) -> dict:
+    def _parse_dsl_line(self, line: str) -> dict:
         command = json_command(line)
         if command is not None:
-            return self._dispatch_dict(command)
+            return command
         toks = shlex.split(line)
         if not toks:
             return {"ok": True}
         op = toks[0].upper()
 
         if op == "S":
-            return self._dispatch_dict({"cmd": "sketch_new", "plane": toks[1] if len(toks) > 1 else "XY"})
+            return {"cmd": "sketch_new", "plane": toks[1] if len(toks) > 1 else "XY"}
         if op == "R":
-            return self._dispatch_dict({
+            return {
                 "cmd": "sketch_add_rect",
                 "u0": float(toks[1]), "v0": float(toks[2]),
                 "width": float(toks[3]), "height": float(toks[4]),
-            })
+            }
         if op == "C":
-            return self._dispatch_dict({
+            return {
                 "cmd": "sketch_add_circle",
                 "cu": float(toks[1]), "cv": float(toks[2]), "radius": float(toks[3]),
-            })
+            }
         if op == "L":
-            return self._dispatch_dict({
+            return {
                 "cmd": "sketch_add_line",
                 "u0": float(toks[1]), "v0": float(toks[2]),
                 "u1": float(toks[3]), "v1": float(toks[4]),
-            })
+            }
         if op == "SOLVE":
-            return self._dispatch_dict({"cmd": "sketch_solve"})
+            return {"cmd": "sketch_solve"}
         if op == "EX":
-            return self._dispatch_dict({
+            return {
                 "cmd": "sketch_extrude",
                 "depth": float(toks[1]) if len(toks) > 1 else 1.0,
                 "symmetric": bool(int(toks[2])) if len(toks) > 2 else False,
                 "name": toks[3] if len(toks) > 3 else "EXCAD_Extrude",
-            })
+            }
         if op == "RV":
-            return self._dispatch_dict({
+            return {
                 "cmd": "sketch_revolve",
                 "angle_deg": float(toks[1]) if len(toks) > 1 else 360.0,
                 "segments": int(toks[2]) if len(toks) > 2 else 48,
                 "name": toks[3] if len(toks) > 3 else "EXCAD_Revolve",
-            })
+            }
         if op == "H":
-            return self._dispatch_dict({
+            return {
                 "cmd": "human_generate",
                 "preset": toks[1] if len(toks) > 1 else "ATHLETIC_FEMALE",
                 "ethnicity": toks[2] if len(toks) > 2 else "BALANCED",
                 "rig": toks[3] if len(toks) > 3 else "default",
                 "apply_skin": bool(int(toks[4])) if len(toks) > 4 else True,
                 "subdiv_level": int(toks[5]) if len(toks) > 5 else 1,
-            })
+            }
         if op == "IMG":
             side = "" if (len(toks) <= 2 or toks[2] == "-") else toks[2]
-            return self._dispatch_dict({
+            return {
                 "cmd": "image_to_mesh",
                 "front_image": toks[1],
                 "side_image": side,
                 "mode": toks[3] if len(toks) > 3 else "MULTIVIEW_CARVE",
                 "height": float(toks[4]) if len(toks) > 4 else 1.75,
                 "depth": float(toks[5]) if len(toks) > 5 else 0.30,
-            })
+            }
         if op == "POLY":
             ptype = _POLY_MAP.get(toks[1], toks[1])
-            return self._dispatch_dict({
+            return {
                 "cmd": "poly_reconstruct",
                 "poly_type": ptype,
                 "image_dir": toks[2],
                 "resolution": int(toks[3]) if len(toks) > 3 else 56,
                 "project_colors": bool(int(toks[4])) if len(toks) > 4 else True,
-            })
+            }
         if op == "FIND":
-            return self._dispatch_dict({"cmd": "asset_search", "query": " ".join(toks[1:])})
+            return {"cmd": "asset_search", "query": " ".join(toks[1:])}
         if op == "USE":
             attach = "" if (len(toks) <= 4 or toks[4] == "-") else toks[4]
-            return self._dispatch_dict({
+            return {
                 "cmd": "asset_use",
                 "query": toks[1],
                 "place_mode": toks[2] if len(toks) > 2 else "NEXT_TO",
                 "target_height": float(toks[3]) if len(toks) > 3 else 0.0,
                 "attach_to": attach,
-            })
+            }
         if op == "STAGE":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_stage",
                 "preset": toks[1] if len(toks) > 1 else "ATHLETIC_FEMALE",
                 "pose": toks[2] if len(toks) > 2 else "RELAXED",
                 "ethnicity": toks[3] if len(toks) > 3 else "BALANCED",
                 "backdrop": toks[4] if len(toks) > 4 else "CYCLORAMA",
-            })
+            }
         if op == "POSE":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_pose",
                 "pose": toks[1] if len(toks) > 1 else "RELAXED",
                 "object": toks[2] if len(toks) > 2 else "",
-            })
+            }
         if op == "PART":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_part",
                 "part_type": toks[1] if len(toks) > 1 else "GEAR",
                 "size": float(toks[2]) if len(toks) > 2 else 0.5,
                 "detail": int(toks[3]) if len(toks) > 3 else 16,
-            })
+            }
         if op == "PROP":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_prop",
                 "prop_type": toks[1] if len(toks) > 1 else "TABLE",
                 "scale": float(toks[2]) if len(toks) > 2 else 1.0,
-            })
+            }
         if op == "STUDIO":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_studio",
                 "style": toks[1] if len(toks) > 1 else "CYCLORAMA",
                 "size": float(toks[2]) if len(toks) > 2 else 4.5,
-            })
+            }
         if op == "STYLE":
-            return self._dispatch_dict({
+            return {
                 "cmd": "character_stylize",
                 "object": toks[1] if len(toks) > 1 else "",
-            })
+            }
         if op == "CITY":
-            return self._dispatch_dict({
+            return {
                 "cmd": "oneshot_city",
                 "grid_blocks": int(toks[1]) if len(toks) > 1 else 5,
                 "seed": int(toks[2]) if len(toks) > 2 else 42,
                 "night_mode": bool(int(toks[3])) if len(toks) > 3 else False,
-            })
+            }
         if op == "DIGEST":
-            return self._dispatch_dict({"cmd": "scene_digest"})
-        return {"ok": False, "error": f"Unknown DSL op: {op}"}
+            return {"cmd": "scene_digest"}
+        raise ValueError(f"Unknown DSL op: {op}")
 
     def _dispatch(self, payload: str) -> str:
         data = json.loads(payload)
         res = self._dispatch_dict(data)
         return _jdump(res)
 
-    def _dispatch_dict(self, data: dict) -> dict:
+    def _dispatch_dict(self, data):
+        self._remembered = False
+        program = self._steps(data)
+        try:
+            task = next(program)
+            while True:
+                try:
+                    value = task()
+                except Exception as exc:
+                    task = program.throw(exc)
+                else:
+                    task = program.send(value)
+        except StopIteration as done:
+            return done.value
+
+    def _remember(self):
+        if not self._remembered:
+            self.history.remember()
+            self._remembered = True
+
+    def _steps(self, data):
         try:
             if not isinstance(data, dict):
                 raise ValueError("Expected a command object")
+            cmd = data.get("cmd", "")
+            if cmd in {"batch", "dsl"}:
+                return (yield from self._sequence(cmd, data))
+            if cmd == "generate_3d":
+                from . import ai_3d_provider as provider
+                scene_uid = bpy.context.scene.session_uid
+                path = yield partial(provider.download_model, data.get("prompt", ""),
+                                     bpy.path.abspath(data["image_path"]) if data.get("image_path") else None,
+                                     data.get("provider", "HUNYUAN3D-2"))
+                try:
+                    if scene_uid != bpy.context.scene.session_uid:
+                        raise ValueError("The active scene changed during generation")
+                    self._remember()
+                    options = {k:v for k,v in data.items() if k not in {"cmd","provider","prompt","image_path"}}
+                    return {"ok": True, **provider.import_model(path, **options)}
+                finally:
+                    path.unlink(missing_ok=True)
+            if cmd not in READ_ONLY and cmd not in {"checkpoint", "undo", "rollback", "reload_addon"}:
+                self._remember()
             result = self._execute(data)
-            if result.get("ok") and data.get("cmd", "").startswith("sketch_"):
+            if result.get("ok") and cmd.startswith("sketch_"):
                 sketch_engine.SketchDocument.active().save()
             return result
         except (KeyError, TypeError, IndexError, ValueError, RuntimeError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _execute(self, data: dict) -> dict:
-        cmd = data.get("cmd", "")
-        doc = sketch_engine.SketchDocument.active()
-        if cmd == "render_inspect":
-            from .inspection import render_inspect
-            return {"ok": True, **render_inspect(**{k: v for k, v in data.items() if k != "cmd"})}
-
-        if cmd == "schema":
-            return {"ok": True, "schema": COMPACT_SCHEMA}
-
-        if cmd == "ping":
-            return {
-                "ok": True,
-                "service": "EX-CAD Addon",
-                "port": self.port,
-                "mpfb": human_engine.is_mpfb_available(),
-            }
-
-        if cmd == "scene_digest":
-            include_all = bool(data.get("include_all", False))
-            since_hash = data.get("since_hash", "")
-            cur_hash, rows = self._build_digest(include_all=include_all)
-            if since_hash and since_hash == cur_hash:
-                return {"ok": True, "unchanged": True, "h": cur_hash}
-
-            cur_map = {r[0]: r for r in rows}
-            if since_hash and since_hash in self._digest_cache:
-                prev_map = self._digest_cache[since_hash]
-                added_or_mod = [r for k, r in cur_map.items() if prev_map.get(k) != r]
-                removed = [k for k in prev_map if k not in cur_map]
-                self._digest_cache[cur_hash] = cur_map
-                if len(self._digest_cache) > 16:
-                    self._digest_cache.pop(next(iter(self._digest_cache)))
-                return {"ok": True, "h": cur_hash, "delta": True, "changed": added_or_mod, "removed": removed}
-
-            self._digest_cache[cur_hash] = cur_map
-            if len(self._digest_cache) > 16:
-                self._digest_cache.pop(next(iter(self._digest_cache)))
-            return {"ok": True, "h": cur_hash, "objs": rows}
-
+    def _sequence(self, cmd, data):
         if cmd == "batch":
             steps = data.get("steps", [])
             stop_on_error = bool(data.get("stop_on_error", True))
@@ -292,7 +360,7 @@ class AiBridgeServer:
             last = {"ok": True}
             success = True
             for index, step in enumerate(steps, 1):
-                last = self._dispatch_dict(step)
+                last = yield from self._steps(step)
                 success = success and last.get("ok", False)
                 if return_all:
                     results.append(last)
@@ -312,12 +380,69 @@ class AiBridgeServer:
             last = {"ok": True}
             for idx, ln in enumerate(lines):
                 try:
-                    last = self._run_dsl_line(ln)
+                    last = yield from self._steps(self._parse_dsl_line(ln))
                 except (KeyError, TypeError, IndexError, ValueError) as exc:
                     last = {"ok": False, "error": str(exc)}
                 if not last.get("ok", False):
                     return {"ok": False, "n": idx + 1, "last": last}
             return {"ok": True, "n": len(lines), "last": last}
+
+    def _execute(self, data: dict) -> dict:
+        cmd = data.get("cmd", "")
+        doc = sketch_engine.SketchDocument.active()
+        if cmd in LAYOUT:
+            args = {k:v for k,v in data.items() if k!="cmd"}
+            if cmd in {"look_at", "place_relative", "set_material"} and "object" in args:
+                args["obj"] = args.pop("object")
+            return {"ok":True, **LAYOUT[cmd](**args)}
+        if cmd in {"checkpoint", "rollback", "undo"}:
+            result = getattr(self.history,cmd)(data["name"]) if cmd!="undo" else self.history.undo()
+            self._remembered = False
+            return {"ok":True, **result}
+        if cmd == "reload_addon":
+            from . import reload_addon
+            reload_addon(self)
+            return {"ok":True, "port":self.port}
+        if cmd == "render_inspect":
+            from .inspection import render_inspect
+            return {"ok": True, **render_inspect(**{k: v for k, v in data.items() if k != "cmd"})}
+
+        if cmd == "schema":
+            return {"ok": True, "schema": COMPACT_SCHEMA}
+
+        if cmd == "ping":
+            return {
+                "ok": True,
+                "service": "EX-CAD Addon",
+                "port": self.port,
+                "mpfb": human_engine.is_mpfb_available(),
+            }
+
+        if cmd == "scene_digest":
+            include_all = bool(data.get("include_all", False))
+            since_hash = data.get("since_hash", "")
+            cur_hash, rows, sketch = self._build_digest(include_all=include_all)
+            if since_hash and since_hash == cur_hash:
+                return {"ok": True, "unchanged": True, "h": cur_hash}
+
+            cur_map = {r[0]: r for r in rows}
+            added_sketch = {"sketch": sketch} if self._sketch_cache.get(since_hash) != sketch else {}
+            self._sketch_cache[cur_hash] = sketch
+            if len(self._sketch_cache) > 16:
+                self._sketch_cache.pop(next(iter(self._sketch_cache)))
+            if since_hash and since_hash in self._digest_cache:
+                prev_map = self._digest_cache[since_hash]
+                added_or_mod = [r for k, r in cur_map.items() if prev_map.get(k) != r]
+                removed = [k for k in prev_map if k not in cur_map]
+                self._digest_cache[cur_hash] = cur_map
+                if len(self._digest_cache) > 16:
+                    self._digest_cache.pop(next(iter(self._digest_cache)))
+                return {"ok": True, "h": cur_hash, "delta": True, "changed": added_or_mod, "removed": removed, **added_sketch}
+
+            self._digest_cache[cur_hash] = cur_map
+            if len(self._digest_cache) > 16:
+                self._digest_cache.pop(next(iter(self._digest_cache)))
+            return {"ok": True, "h": cur_hash, "objs": rows, **added_sketch}
 
         if cmd == "list":
             objs = [
@@ -552,9 +677,6 @@ class AiBridgeServer:
             from .sdf_engine import generate_sdf
             obj = generate_sdf(**{k:v for k,v in data.items() if k != "cmd"})
             return {"ok": True, "name": obj.name, "verts": len(obj.data.vertices), "faces": len(obj.data.polygons)}
-        if cmd == "generate_3d":
-            from .ai_3d_provider import generate_3d
-            return {"ok": True, **generate_3d(**{k:v for k,v in data.items() if k != "cmd"})}
         if cmd == "poly_bake":
             from .uv_bake import bake
             obj = bpy.context.scene.objects[data["object"]]
@@ -657,19 +779,8 @@ class AiBridgeServer:
             return {"ok": True, **result}
         return {"ok": False, "error": f"Unknown command: {cmd}"}
 
-    def _server_loop(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(0.2)
-        try:
-            sock.bind(("127.0.0.1", self.port))
-            sock.listen(8)
-        except OSError:
-            self.running = False
-            sock.close()
-            return
-
-        while self.running:
+    def _server_loop(self, sock):
+        while self.running and sock is self._socket:
             try:
                 client, _ = sock.accept()
             except socket.timeout:
@@ -677,9 +788,14 @@ class AiBridgeServer:
             except OSError:
                 break
             with client:
+                client.settimeout(15)
                 chunks = []
                 while True:
-                    chunk = client.recv(4096)
+                    try:
+                        chunk = client.recv(4096)
+                    except OSError:
+                        chunks.clear()
+                        break
                     if not chunk:
                         break
                     chunks.append(chunk)
@@ -690,9 +806,12 @@ class AiBridgeServer:
                     holder = {}
                     evt = threading.Event()
                     self._queue.put((payload, holder, evt))
-                    if evt.wait(timeout=30.0):
+                    if evt.wait(timeout=1200.0):
                         reply = holder.get("resp", '{"ok":false,"error":"Empty"}')
                     else:
                         reply = '{"ok":false,"error":"Timeout"}'
-                    client.sendall((reply + "\n").encode("utf-8"))
+                    try:
+                        client.sendall((reply + "\n").encode("utf-8"))
+                    except OSError:
+                        pass
         sock.close()
