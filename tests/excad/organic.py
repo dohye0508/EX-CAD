@@ -57,6 +57,17 @@ for i, tree in enumerate(
     ]
 ):
     sdf("Sample " + str(i), tree, resolution=40, remesh="VOXEL" if i == 2 else "QUAD")
+# A vertical oval handle can be combined with an upright vessel in one tree.
+torus = shape("torus", major_radius=0.4, minor_radius=0.08, scale=[1.5, 0.75, 0.5],
+              rotation_deg=[90, 0, 0], center=[0.8, -0.2, 0.55])
+handle = sdf("Upright handle", torus, resolution=100)
+bpy.context.view_layer.update()
+assert not handle.ray_cast((0.8, -1, 0.55), (0, 1, 0))[0]
+hit, point, _, _ = handle.ray_cast((1.4, -1, 0.55), (0, 1, 0))
+assert hit and abs(point.y - (-0.24)) < 0.005, point
+assert np.allclose(handle.dimensions, (1.44, 0.08, 0.72), atol=0.007), handle.dimensions[:]
+invalid = bridge._dispatch_dict({"cmd": "sdf_generate", "tree": dict(torus, scale=[1, 0, 1]), "name": "Invalid handle"})
+assert not invalid["ok"] and "Invalid handle" not in bpy.data.objects
 # A fully enclosed void must subtract from the signed volume of the outer surface.
 hollow = sdf(
     "Hollow sphere",

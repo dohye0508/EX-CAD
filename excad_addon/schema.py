@@ -29,7 +29,7 @@ TOPICS = {
         "install_asset_pack{pack:all|system|shirts|pants|skirts}; equip_asset{human,name,pack?}."
     ),
     "organic": (
-        "sdf_generate{name,tree,resolution?:16..256,remesh?:AUTO|QUAD|VOXEL}; leaves have type and optional center. "
+        "sdf_generate{name,tree,resolution?:16..256,remesh?:AUTO|QUAD|VOXEL}; nodes accept center, rotation_deg XYZ, scale. "
         "sphere{radius},capsule{a,b,radius},ellipsoid{radii},round_box{size,radius},torus{major_radius,minor_radius},cone{height,radius,top_radius?}. "
         "smooth_union/subtract/intersect{children,k},mirror_x{child},radial_array{child,count},twist{child,degrees_per_unit},bend{child,radius}. "
         "poly_render{output_dir,poly_type?,center?,size?,img_res?,write_depth?}; poly_reconstruct{image_dir,poly_type,center,size,use_depth?,texture_mode?:UV|VERTEX}; poly_bake{object,image_dir,poly_type,center,size,texture_size?,use_depth?,path?}. "

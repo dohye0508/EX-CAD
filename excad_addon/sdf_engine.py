@@ -5,6 +5,7 @@ import math
 
 import bpy
 import numpy as np
+from mathutils import Euler
 
 from . import feature_geometry as geo
 from .feature_tree import _solid
@@ -176,6 +177,26 @@ def compile_node(node, depth=0):
             bounds = np.stack((np.min(coords, 0), np.max(coords, 0)))
     else:
         raise ValueError(f"Unknown SDF operation {kind}")
+
+    if "rotation_deg" in node or "scale" in node:
+        rotation = Euler(np.radians(_vec(node.get("rotation_deg", (0, 0, 0)))), "XYZ")
+        factor = node.get("scale", 1.0)
+        scale = _vec([factor] * 3 if np.isscalar(factor) else factor)
+        if np.min(scale) <= 0:
+            raise ValueError("SDF scale must be positive")
+        rotation = np.asarray(rotation.to_matrix(), dtype=np.float32)
+        inverse = rotation.T / scale[:, None]
+        corners = (_corners(bounds) * scale) @ rotation.T + origin
+        # The smallest singular value keeps the field conservative in the
+        # parent frame when smoothing a non-uniformly scaled operand.
+        distance_scale = float(np.min(scale))
+
+        def transformed(points):
+            relative = [x - c for x, c in zip(points, origin)]
+            local = tuple(sum(weight * p for weight, p in zip(row, relative) if weight) for row in inverse)
+            return distance_scale * sample(local)
+
+        return transformed, np.stack((corners.min(0), corners.max(0)))
 
     def field(p):
         return sample(tuple(x - c for x, c in zip(p, origin)))
