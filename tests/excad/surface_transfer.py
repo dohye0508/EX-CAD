@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Check UV chart registration and seams after an edit or a real GLB voxel import."""
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import bpy
-from mathutils import Matrix, Vector
 import numpy as np
+from mathutils import Matrix, Vector
 
 from excad_addon.ai_3d_provider import import_model
 from excad_addon.feature_tree import _solid

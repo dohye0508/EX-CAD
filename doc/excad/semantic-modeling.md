@@ -88,6 +88,12 @@ assert edited["ok"], edited
 
 `resolution`은 가장 긴 축의 격자 해상도다. `QUAD`는 표면을 사각면으로 추출하고 `VOXEL`은 Blender의 복셀 리메시를 적용한다. 사각면에 비매니폴드 연결이 생긴 경우에도 복셀 리메시를 거쳐 솔리드를 검사한다. 각 노드는 `scale`, XYZ 기준 `rotation_deg`, `center` 순서로 변환된다. 예를 들어 토러스에 `rotation_deg: [90,0,0]`과 `scale: [1.2,1,1]`을 주면 손잡이에 쓸 수 있는 세로 고리가 된다.
 
+저장한 `.blend`를 다시 연 뒤에도 아래 명령으로 화분의 안쪽과 바깥쪽 윗반지름을 함께 바꿀 수 있다. 새 메시로 UV, 면별 재질, 정점 색과 웨이트를 옮긴다. 같은 메시를 공유하던 다른 인스턴스는 원래 치수를 유지한다. SDF 위에 스케치로 구멍이나 돌출을 추가한 모델에서는 SDF 치수를 바꿀 때 CAD 피처도 순서대로 다시 실행한다. `save_feature_tree`로 저장한 JSON에 두 레시피가 함께 들어간다. 셰이프 키가 있는 메시의 SDF 갱신은 정점 대응을 보존할 수 없어 장면 변경 전에 오류를 반환한다.
+
+```json
+{"cmd":"sdf_generate","object":"Planter","parameters":{"children.0.top_radius":0.64,"children.1.top_radius":0.59}}
+```
+
 다면 투영의 `poly_reconstruct`에는 똑같은 중심과 크기에 정렬된 `face_00.png` 등의 이미지를 준다. 선택적인 `face_00_depth.png`는 같은 해상도의 선형 깊이로, 정사영 박스의 가까운 면이 0이고 먼 면이 1이다. `poly_bake`는 Smart UV와 법선 가중치로 기본 2048 × 2048 PNG를 만든다. 선형 색 공간에서 여러 시점을 혼합한 결과를 sRGB 이미지로 저장한다. `use_depth: false`로 색 이미지만 쓸 수 있다. 공유 메시의 한 인스턴스를 베이크하면 그 인스턴스에 새 UV와 재질이 적용된다.
 
 기존 장면에서 입력을 만들 때는 아래 요청으로 정렬된 RGBA 이미지 20장과 16비트 깊이 이미지 20장을 함께 저장한다. `center`에는 촬영 범위의 중심을, `size`에는 한 변의 길이를 준다. 재구성에도 같은 값을 사용한다. `poly_render`는 현재 렌더 엔진으로 별도 장면에서 촬영한 뒤 기존 카메라·컴포지터·출력 설정으로 돌아온다. [Blender 렌더 패스](https://docs.blender.org/manual/en/5.2/render/layers/passes.html)
@@ -133,6 +139,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/endurance.py -- 71127038
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/overlay.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/surface_transfer.py
+& $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/sdf_rebuild.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003 81128007 81128018 81128021
 ```

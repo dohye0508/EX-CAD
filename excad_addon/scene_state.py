@@ -119,6 +119,8 @@ def rows(include_all=False):
             ],
         )
         verts = faces = 0
+        if "excad_sdf_recipe" in obj:
+            _feed(h, obj["excad_sdf_recipe"])
         if ev.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}:
             with evaluated_mesh(ev) as mesh:
                 if mesh:

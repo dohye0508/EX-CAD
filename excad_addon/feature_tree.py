@@ -149,6 +149,96 @@ def _carry_face_materials(source, rebuilt):
     rebuilt.polygons.foreach_set("material_index", result)
 
 
+def _bounds_frame(mesh):
+    xyz = _vertex_positions(mesh)
+    span = np.maximum(np.ptp(xyz, axis=0), 1e-8)
+    return Matrix.Diagonal(Vector((*np.reciprocal(span), 1))) @ Matrix.Translation(Vector(-xyz.min(0)))
+
+
+def _carry_attributes(owner, body):
+    from .uv_transfer import transfer_uv
+
+    source, result = owner.data, body.data
+    if source.uv_layers:
+        transfer_uv(source, result, normalize=True)
+    if not owner.vertex_groups and not source.color_attributes:
+        return
+    # Map pristine local geometry in unit bounds. Modifiers, parents and the
+    # object's current pose must not affect the correspondence of its rest mesh.
+    proxy = bpy.data.objects.new("EXCAD transfer source", source)
+    bpy.context.collection.objects.link(proxy)
+    original = body.matrix_world.copy()
+    try:
+        proxy.matrix_world, body.matrix_world = _bounds_frame(source), _bounds_frame(result)
+        bpy.context.view_layer.update()
+        types = set()
+        for group in owner.vertex_groups:
+            copied = body.vertex_groups.get(group.name) or body.vertex_groups.new(name=group.name)
+            copied.lock_weight = group.lock_weight
+            types.add("VGROUP_WEIGHTS")
+        for color in source.color_attributes:
+            if color.name not in result.color_attributes:
+                result.color_attributes.new(color.name, color.data_type, color.domain)
+            types.add("COLOR_VERTEX" if color.domain == "POINT" else "COLOR_CORNER")
+        with bpy.context.temp_override(
+            object=proxy, active_object=proxy, selected_objects=[proxy, body], selected_editable_objects=[proxy, body]
+        ):
+            for data_type in sorted(types):
+                status = bpy.ops.object.data_transfer(
+                    data_type=data_type,
+                    use_create=True,
+                    layers_select_src="ALL",
+                    layers_select_dst="NAME",
+                    vert_mapping="POLYINTERP_NEAREST",
+                    loop_mapping="POLYINTERP_NEAREST",
+                    use_object_transform=True,
+                )
+                if "FINISHED" not in status:
+                    raise ValueError(f"Could not transfer {data_type} onto the rebuilt surface")
+        if source.color_attributes:
+            active = source.color_attributes.active_color
+            if active:
+                result.color_attributes.active_color = result.color_attributes[active.name]
+            index = source.color_attributes.render_color_index
+            if 0 <= index < len(source.color_attributes):
+                result.color_attributes.render_color_index = result.color_attributes.find(
+                    source.color_attributes[index].name
+                )
+    finally:
+        body.matrix_world = original
+        bpy.data.objects.remove(proxy, do_unlink=True)
+
+
+def replace_mesh(owner, body):
+    """Retain the object, links and painted surface when replacing its generated solid."""
+    old, result = owner.data, body.data
+    overrides = [(s.link, s.material) for s in owner.material_slots]
+    active = owner.active_material_index
+    active_group = owner.vertex_groups.active.name if owner.vertex_groups.active else None
+    result.materials.clear()
+    for material in old.materials:
+        result.materials.append(material)
+    if old.polygons:
+        if len(old.materials) > 1:
+            _carry_face_materials(old, result)
+        _carry_attributes(owner, body)
+    try:
+        owner.data = result
+        for slot, (link, material) in zip(owner.material_slots, overrides):
+            slot.link = link
+            if link == "OBJECT":
+                slot.material = material
+        if overrides:
+            owner.active_material_index = active
+        if active_group and active_group in owner.vertex_groups:
+            owner.vertex_groups.active_index = owner.vertex_groups[active_group].index
+    except Exception:
+        owner.data = old
+        raise
+    if old.users == 0 and not old.library:
+        bpy.data.meshes.remove(old)
+
+
 class FeatureTree:
     def __init__(self, name, recipe=None):
         self.name = name
@@ -166,10 +256,15 @@ class FeatureTree:
             if self.owner:
                 mesh, matrix = self.owner.data, self.owner.matrix_world
                 reflected = matrix.to_3x3().determinant() < 0
-                self.recipe["base"] = {
-                    "vertices": [list(matrix @ v.co) for v in mesh.vertices],
-                    "faces": [list(reversed(p.vertices[:])) if reflected else list(p.vertices) for p in mesh.polygons],
-                }
+                if "excad_sdf_recipe" in self.owner:
+                    self.recipe["base"] = {"sdf": json.loads(self.owner["excad_sdf_recipe"])}
+                else:
+                    self.recipe["base"] = {
+                        "vertices": [list(matrix @ v.co) for v in mesh.vertices],
+                        "faces": [
+                            list(reversed(p.vertices[:])) if reflected else list(p.vertices) for p in mesh.polygons
+                        ],
+                    }
                 self.recipe["model_frame"] = [list(row) for row in matrix]
         if self.recipe.get("version", 1) != 1:
             raise ValueError("Unsupported feature tree version")
@@ -210,7 +305,15 @@ class FeatureTree:
         current_placement = self.owner.matrix_world @ model_frame.inverted() if self.owner else Matrix.Identity(4)
         with geo.construction() as objects:
             base = recipe.get("base")
-            body = geo.new_mesh(objects, base["vertices"], base["faces"], orient=False) if base else None
+            if base and "sdf" in base:
+                from .sdf_engine import build_sdf
+
+                body = build_sdf(objects, base["sdf"])
+                body.data.transform(model_frame)
+                if model_frame.to_3x3().determinant() < 0:
+                    body.data.flip_normals()
+            else:
+                body = geo.new_mesh(objects, base["vertices"], base["faces"], orient=False) if base else None
             for i, feature in enumerate(recipe["features"]):
                 kind = feature["type"].upper()
                 try:
@@ -305,26 +408,16 @@ class FeatureTree:
                 bpy.context.collection.objects.link(self.owner)
                 self.owner.matrix_world = model_frame
             else:
-                old = self.owner.data
-                overrides = [(s.link, s.material) for s in self.owner.material_slots]
-                active = self.owner.active_material_index
-                for material in old.materials:
-                    result.materials.append(material)
-                if len(old.materials) > 1 and old.polygons:
-                    _carry_face_materials(old, result)
-                self.owner.data = result
-                for slot, (link, material) in zip(self.owner.material_slots, overrides):
-                    slot.link = link
-                    if link == "OBJECT":
-                        slot.material = material
-                if overrides:
-                    self.owner.active_material_index = active
-                if old.users == 0 and not old.library:
-                    bpy.data.meshes.remove(old)
+                replace_mesh(self.owner, body)
             result.name = f"{self.owner.name} Solid"
             self.owner["excad_tree"] = raw
-            bpy.context.view_layer.objects.active = self.owner
-            self.owner.select_set(True)
+            if base and "sdf" in base:
+                self.owner["excad_sdf_recipe"] = json.dumps(base["sdf"], separators=(",", ":"), allow_nan=False)
+            elif "excad_sdf_recipe" in self.owner:
+                del self.owner["excad_sdf_recipe"]
+            if self.owner.name in bpy.context.view_layer.objects:
+                bpy.context.view_layer.objects.active = self.owner
+                self.owner.select_set(True)
         return self.owner
 
 

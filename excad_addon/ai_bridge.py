@@ -732,7 +732,8 @@ class AiBridgeServer:
             return {"ok": True, "views": len(images), "manifest": manifest}
         if cmd == "sdf_generate":
             from .sdf_engine import generate_sdf
-            obj = generate_sdf(**{k:v for k,v in data.items() if k != "cmd"})
+            args = {k:v for k,v in data.items() if k not in {"cmd", "object", "target"}}
+            obj = generate_sdf(target=data.get("object", data.get("target")), **args)
             return {"ok": True, "name": obj.name, "verts": len(obj.data.vertices), "faces": len(obj.data.polygons)}
         if cmd == "poly_bake":
             from .uv_bake import bake
