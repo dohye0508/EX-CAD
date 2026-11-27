@@ -143,6 +143,9 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 | [파라메트릭 플레이트](previews/phase1-cad.png) · [스케치 오버레이](previews/phase1-sketch-overlay.png) | 장공과 모서리 가공, 고정 도형과 자유 도형의 선색, 치수 |
 | [사진에 맞춘 인물](previews/phase2-character.png) | MPFB 얼굴 모프, 포니테일, 셔츠·바지·신발의 피팅 |
 | [SDF 꽃병](previews/phase3-sdf.png) · [20면 UV 복원](previews/phase3-uv.png) | 용기의 열린 입구와 내부 형상, 비대칭 유약 무늬의 정렬 |
+| [TRELLIS 입력](previews/trellis-reference.png) · [실제 생성 결과](previews/trellis-generated.png) | Cycles로 렌더한 꽃병에서 생성한 GLB. 색상은 반영됐으며 좁은 목과 굴곡은 원통에 가깝게 단순화됐다. |
 | [받침대 위 화분](previews/phase4-layout.png) | 서로 다른 두 물체의 접지, 목재와 도자기 재질, 스튜디오 조명 |
+
+TRELLIS 실측은 공개 Gradio 모델 서버에 합성 꽃병 이미지 한 장을 보낸 결과다. 생성과 다운로드에는 75.8초가 걸렸다. Blender에서 텍스처 경계의 정점을 연결한 결과 정점 5,885개·삼각형 11,766개이며 열린 경계와 비매니폴드 모서리는 0개였다. [검증에 사용한 TRELLIS 서버](https://huggingface.co/spaces/trellis-community/TRELLIS)
 
 인물 예제의 얼굴 비율은 scikit-image가 제공하는 NASA의 에일린 콜린스 사진에서 측정했다. 머리 모양, 의상, 피부색은 별도 스타일 파라미터로 정했다. [검증용 사진 출처](https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut)
