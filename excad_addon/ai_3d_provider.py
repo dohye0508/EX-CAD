@@ -286,6 +286,7 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
 
     from .asset_fetcher import _root_objects, bone_shapes, import_asset_file
     from .humanoid_skin import fit_imported
+    from .inspect_shading import warm_materials
 
     mode = "PARTS" if rig is True else "NONE" if not rig else str(rig).upper()
     if not math.isfinite(height) or height <= 0 or mode not in {"NONE", "PARTS", "HUMANOID"} or not name.strip():
@@ -367,6 +368,8 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
                 root.matrix_world = world
         model.name = name
         bpy.context.view_layer.update()
+        for obj in meshes:
+            warm_materials(obj)
         return {
             "name": model.name,
             "objects": [o.name for o in imported],

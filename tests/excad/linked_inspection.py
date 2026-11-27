@@ -97,7 +97,14 @@ def check_packed_texture(root):
         loaded.pack()
         inspect_shading._thumbnails.clear()
         with patch("imbuf.load_from_buffer", side_effect=AssertionError("Redecoded the same packed texture")):
+            # A different workstation starts without an on-disk thumbnail.
+            with patch.dict("os.environ", EXCAD_CACHE=str(root / "other workstation")):
+                assert np.allclose(inspect_shading.thumbnail(loaded), reference, atol=0.001)
+            inspect_shading._thumbnails.clear()
+            saved = loaded[inspect_shading._EMBEDDED_PREVIEW].to_dict()
+            del loaded[inspect_shading._EMBEDDED_PREVIEW]
             assert np.allclose(inspect_shading.thumbnail(loaded), reference, atol=0.001)
+            loaded[inspect_shading._EMBEDDED_PREVIEW] = saved
         # Keep the same image ID, filename, and colorspace while replacing its packed bytes.
         updated = images[1].read_bytes()
         loaded.pack(data=updated, data_len=len(updated))

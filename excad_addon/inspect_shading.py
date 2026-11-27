@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import tempfile
+import zlib
 
 import bpy
 import numpy as np
@@ -14,6 +15,7 @@ import numpy as np
 from .image_colors import has_srgb_bytes, srgb_to_linear
 
 _thumbnails = OrderedDict()
+_EMBEDDED_PREVIEW = "excad_material_preview"
 
 
 def _principled(mat):
@@ -67,7 +69,7 @@ def _texture_node(mat):
 def _file_digest(path, revision):
     # Size and modification time invalidate this digest when a file is replaced.
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").digest()
+        return hashlib.file_digest(source, "blake2b").digest()
 
 
 def _thumbnail_file(identity):
@@ -91,6 +93,42 @@ def _store_thumbnail(path, pixels):
             pending.unlink(missing_ok=True)
 
 
+def _embed_thumbnail(image, signature, pixels):
+    if image.library or not image.is_editable:
+        return
+    stored = image.get(_EMBEDDED_PREVIEW)
+    if hasattr(stored, "get") and stored.get("key") == signature:
+        return
+    height, width = pixels.shape[:2]
+    image[_EMBEDDED_PREVIEW] = {
+        "key": signature,
+        "width": width,
+        "height": height,
+        "pixels": zlib.compress(pixels.astype("<f2").tobytes(), level=1),
+    }
+
+
+def _embedded_thumbnail(image, signature):
+    stored = image.get(_EMBEDDED_PREVIEW)
+    if not hasattr(stored, "get") or stored.get("key") != signature:
+        return None
+    width, height = stored.get("width"), stored.get("height")
+    if not all(isinstance(n, int) and 1 <= n <= 384 for n in (width, height)):
+        return None
+    size = width * height * 4 * 2
+    data = stored.get("pixels")
+    if not isinstance(data, bytes) or len(data) > size + 4096:
+        return None
+    try:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(data, size + 1)
+    except zlib.error:
+        return None
+    if len(raw) != size or not decoder.eof:
+        return None
+    return np.frombuffer(raw, dtype="<f2").reshape(height, width, 4).astype(np.float32)
+
+
 def thumbnail(image, persist=False):
     if image is None:
         return None
@@ -100,7 +138,7 @@ def thumbnail(image, persist=False):
     can_read_file = image.source == "FILE" and not image.is_dirty
     if can_read_file and image.packed_file:
         packed = image.packed_file.data
-        digest = hashlib.sha256(packed).digest()
+        digest = hashlib.blake2b(packed).digest()
     elif can_read_file and image.filepath:
         path = Path(bpy.path.abspath(image.filepath, library=image.library))
         try:
@@ -114,12 +152,14 @@ def thumbnail(image, persist=False):
     cached = _thumbnail_file(key) if digest else None
     if not image.is_dirty and key in _thumbnails:
         _thumbnails.move_to_end(key)
-        if persist and cached and not cached.is_file():
-            _store_thumbnail(cached, _thumbnails[key])
+        if persist and cached:
+            _embed_thumbnail(image, cached.stem, _thumbnails[key])
+            if not cached.is_file():
+                _store_thumbnail(cached, _thumbnails[key])
         return _thumbnails[key]
 
-    pixels = None
-    if cached and cached.is_file():
+    pixels = _embedded_thumbnail(image, cached.stem) if cached else None
+    if pixels is None and cached and cached.is_file():
         try:
             array = np.load(cached, allow_pickle=False, mmap_mode="r")
             if array.ndim == 3 and array.shape[2] == 4 and max(array.shape[:2]) <= 384 and array.dtype == np.float16:
@@ -165,6 +205,8 @@ def thumbnail(image, persist=False):
         _thumbnails[key] = pixels
         if len(_thumbnails) > 24:
             _thumbnails.popitem(last=False)
+        if persist and cached:
+            _embed_thumbnail(image, cached.stem, pixels)
         if (persist or packed is not None) and cached and not restored:
             _store_thumbnail(cached, pixels)
     return pixels
