@@ -339,6 +339,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert all(v.groups for v in obj.data.vertices)
                 run("place_relative", obj=res["name"], relation="ALIGN_FLOOR", gap=0.2)
                 assert abs(providers._dimensions([obj])[0].z - 0.2) < 1e-5
+        direct = providers.generate_3d("vase", provider="HUNYUAN3D-2", timeout=5, height=0.42, name="Direct import")
+        assert direct["height"] == 0.42 and bpy.data.objects[direct["name"]]
         # Several unparented imported parts must behave as one placement target.
         for item in list(bpy.context.selected_objects):
             item.select_set(False)

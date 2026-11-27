@@ -343,7 +343,9 @@ def import_model(path, height=1.0, remesh=False, rig=False, name="Generated mode
 
 
 def generate_3d(prompt="", image_path=None, provider="HUNYUAN3D-2", **options):
-    path = download_model(prompt, image_path, provider, texture=options.pop("texture", False))
+    path = download_model(
+        prompt, image_path, provider, timeout=options.pop("timeout", 900), texture=options.pop("texture", False)
+    )
     try:
         return import_model(path, **options)
     finally:
