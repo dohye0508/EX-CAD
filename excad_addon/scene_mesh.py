@@ -240,6 +240,29 @@ def surfaces(target="ALL", shading=False):
     return [item for obj in visible_geometry(objects) if (item := read_surface(obj, graph, shading, cache))]
 
 
+_INSIDE_RAYS = tuple(
+    Vector(d).normalized()
+    for d in ((0.62371, 0.72193, 0.29977), (-0.31173, 0.80013, -0.20517), (0.92159, -0.37009, 0.12371))
+)
+
+
+def _ray_hits(tree, origin, direction, precision):
+    point = origin
+    hits, previous, travel, step = 0, None, 0.0, precision
+    while True:
+        location, _, face, _ = tree.ray_cast(point, direction)
+        if face is None:
+            return hits
+        if face == previous:
+            step *= 2
+        else:
+            hits += 1
+            step = precision
+        previous = face
+        travel = max(travel, (location - origin).dot(direction)) + step
+        point = origin + direction * travel
+
+
 def _inside(surface, point, eps):
     if np.any(point <= surface.bounds[0] + eps) or np.any(point >= surface.bounds[1] - eps):
         return False
@@ -248,15 +271,17 @@ def _inside(surface, point, eps):
     _, _, index, distance = tree.find_nearest(p)
     if index is None or distance <= eps:
         return False
-    # Odd-even classification also works on reflected meshes and enclosed cavities.
-    direction = Vector((0.62371, 0.72193, 0.29977)).normalized()
-    hits = 0
-    while True:
-        location, _, face, _ = tree.ray_cast(p, direction)
-        if face is None:
-            return hits % 2 == 1
-        hits += 1
-        p = location + direction * (4 * eps)
+    # The clearance tolerance applies at the query point. Farther along the
+    # ray, even two skins closer than this tolerance must count as two hits.
+    precision = max(1e-5, float(np.abs(surface.bounds).max())) * float(2 * np.finfo(np.float32).eps)
+    first = _ray_hits(tree, p, _INSIDE_RAYS[0], precision)
+    if first == 0:
+        return False
+    second = _ray_hits(tree, p, _INSIDE_RAYS[1], precision)
+    if first % 2 == second % 2:
+        return bool(first % 2)
+    # A seam or a grazing triangle can make one ray ambiguous.
+    return bool(_ray_hits(tree, p, _INSIDE_RAYS[2], precision) % 2)
 
 
 def _crosses(a, b, pairs, eps):

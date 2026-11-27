@@ -88,6 +88,33 @@ def verify_collision_geometry():
 verify_collision_geometry()
 
 
+def thin_walls():
+    # The probe is between two closed panels. A ray must count both faces of the
+    # thin panel even when their separation is below the requested contact tolerance.
+    bpy.ops.mesh.primitive_cube_add(size=2)
+    probe = bpy.context.object
+    probe.scale = (0.01,) * 3
+    points, faces = [], []
+    for center, half in ((-0.3, 0.05), (0.2, 0.000005)):
+        offset = len(points)
+        points.extend((center + v.co.x * half, v.co.y, v.co.z) for v in probe.data.vertices)
+        faces.extend(tuple(offset + i for i in face.vertices) for face in probe.data.polygons)
+    mesh = bpy.data.meshes.new("Separated panels")
+    mesh.from_pydata(points, [], faces)
+    mesh.update()
+    panels = bpy.data.objects.new(mesh.name, mesh)
+    bpy.context.collection.objects.link(panels)
+    for x, inside in ((0, False), (-0.3, True)):
+        probe.location.x = x
+        hits = run("check_intersections", objects=[panels.name, probe.name])["intersections"]
+        assert bool(hits) == inside, (x, hits)
+    for obj in (probe, panels):
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
+thin_walls()
+
+
 def grazing_wedges():
     # Two inclined pads meet at a corner. Small roundoff produces a long,
     # almost tangent triangle interval. A 50-micron downward move cuts solid material.
