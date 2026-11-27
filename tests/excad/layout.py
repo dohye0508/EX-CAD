@@ -87,6 +87,36 @@ def verify_collision_geometry():
 
 verify_collision_geometry()
 
+
+def grazing_wedges():
+    # Two inclined pads meet at a corner. Small roundoff produces a long,
+    # almost tangent triangle interval. A 50-micron downward move cuts solid material.
+    def prism(name, triangle, depth):
+        mesh = bpy.data.meshes.new(name)
+        caps = [*triangle, *((x, y, z + depth) for x, y, z in triangle)]
+        mesh.from_pydata(caps, [], [(0, 1, 2), (5, 4, 3), (1, 0, 3, 4), (2, 1, 4, 5), (0, 2, 5, 3)])
+        mesh.update()
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        return obj
+
+    lower = prism("Slope pad", [
+        (-0.18333334, 1.83333337, 0.55939722), (0, 1.83333337, 0.51365227), (0, 2.01666665, 0.52496773),
+    ], -0.035)
+    upper = prism("Contact pad", [
+        (-0.03570316, 1.83592772, 0.52295268), (-0.02263507, 1.83966768, 0.52028036),
+        (-0.01960059, 1.82945263, 0.51795673),
+    ], 0.035)
+    for shift, expected in ((0, False), (-0.000005, False), (-0.00005, True)):
+        upper.location.z = shift
+        hits = run("check_intersections", objects=[lower.name, upper.name])["intersections"]
+        assert bool(hits) == expected, (shift, hits)
+    for obj in (lower, upper):
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
+grazing_wedges()
+
 # A bounding box overlaps this frame, but its opening cannot support the peg.
 run(
     "feature_tree",

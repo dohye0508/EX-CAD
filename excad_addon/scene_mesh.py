@@ -264,7 +264,7 @@ def _crosses(a, b, pairs, eps):
     if not (a.closed and b.closed):
         return True
     ia, ib = np.asarray(pairs, dtype=np.int32).T
-    ta, tb = a.points[a.triangles[ia]], b.points[b.triangles[ib]]
+    ta, tb = a.points[a.triangles[ia]].astype(np.float64), b.points[b.triangles[ib]].astype(np.float64)
 
     def normals(triangles):
         v = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
@@ -277,21 +277,33 @@ def _crosses(a, b, pairs, eps):
     straddle_b = (db.min(axis=1) < -eps) & (db.max(axis=1) > eps)
     for i in np.flatnonzero(straddle_a & straddle_b):
         axis = np.cross(na[i], nb[i])
-        axis /= max(np.linalg.norm(axis), 1e-12)
+        sine = np.linalg.norm(axis)
+        axis /= max(sine, 1e-12)
 
         def interval(triangle, distances):
-            values = []
+            points = []
             for j in range(3):
                 d, e = distances[j - 1], distances[j]
                 if (d > 0) != (e > 0):
                     point = triangle[j - 1] + (triangle[j] - triangle[j - 1]) * (d / (d - e))
-                    values.append(np.dot(point, axis))
-            return min(values), max(values)
+                    points.append(point)
+            values = np.asarray(points) @ axis
+            return values.min(), values.max(), points[0]
 
-        low_a, high_a = interval(ta[i], da[i])
-        low_b, high_b = interval(tb[i], db[i])
-        if min(high_a, high_b) - max(low_a, low_b) > eps:
-            return True
+        low_a, high_a, start = interval(ta[i], da[i])
+        low_b, high_b, _ = interval(tb[i], db[i])
+        low, high = max(low_a, low_b), min(high_a, high_b)
+        if high - low > eps:
+            center = start + axis * ((low + high) * 0.5 - np.dot(start, axis))
+            # Almost tangent triangles can share a long interval at their edge
+            # with negligible penetration. Measure their available depth normal
+            # to the other face before classifying the interval as a crossing.
+            triangles = np.stack((ta[i], tb[i]))
+            edges = np.roll(triangles, -1, axis=1) - triangles
+            margins = np.linalg.norm(np.cross(edges, center - triangles), axis=2)
+            margins /= np.maximum(np.linalg.norm(edges, axis=2), 1e-20)
+            if margins.min() * sine > eps:
+                return True
     # Aligned or coincident boundaries may overlap without a transverse triangle
     # crossing. Sample both sides of the overlapping triangle patch inside both solids.
     coplanar = (np.abs(da).max(axis=1) <= eps) & (np.abs(db).max(axis=1) <= eps)
@@ -306,9 +318,19 @@ def _crosses(a, b, pairs, eps):
     for subject, container, ids in ((a, b, ia), (b, a, ib)):
         triangles = subject.triangles[np.unique(ids)]
         vertices = subject.points[np.unique(triangles)]
-        midpoints = subject.points[triangles].mean(axis=1)
+        corners = subject.points[triangles]
+        midpoints = corners.mean(axis=1)
         if any(_inside(container, p, eps) for p in np.concatenate((vertices, midpoints))):
             return True
+        # BVH overlap can return only transverse edge neighbours for identical
+        # rotated shells, omitting the coplanar face pairs themselves.
+        for point, normal in zip(midpoints, normals(corners)):
+            _, other_normal, face, _ = container.bvh.find_nearest(Vector(point), eps)
+            if face is not None and abs(np.dot(normal, other_normal)) > 0.999:
+                for side in (-1, 1):
+                    sample = point + normal * (side * 5 * eps)
+                    if _inside(subject, sample, eps) and _inside(container, sample, eps):
+                        return True
     return False
 
 
