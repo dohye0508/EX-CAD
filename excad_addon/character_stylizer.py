@@ -422,3 +422,29 @@ def stylize_portrait_character(human_obj, add_hair=True, add_sweater=True, add_n
         eval_obj.to_mesh_clear()
         for m in toggled_mods:
             m.show_viewport = True
+
+
+def style_character(human, options):
+    from . import wardrobe
+    from .human_assets import equip_asset
+    if human is None or human.type != "MESH":
+        raise ValueError("Specify the MPFB basemesh to style")
+    created = []
+    if options.get("skin") or "lip_tint" in options:
+        wardrobe.skin(human, options.get("skin", "WARM_BEIGE"), options.get("lip_tint", (0.40,0.105,0.10)))
+    if options.get("eyes") or "iris_color" in options or "iris_size" in options:
+        created.extend(wardrobe.eyes(human, options.get("iris_color", (0.10,0.055,0.024)),
+                                     options.get("iris_size", 0.52)))
+    if options.get("lashes"):
+        created.append(equip_asset(human, "eyelashes02"))
+    if options.get("teeth"):
+        created.append(equip_asset(human, "teeth_base"))
+    if isinstance(options.get("hair"), str):
+        created.extend(wardrobe.hair_style(human, options["hair"]))
+    garments = options.get("clothes", [])
+    for garment in ([garments] if isinstance(garments,str) else garments):
+        created.append(wardrobe.garment(human, garment))
+    if "expression" in options:
+        wardrobe.expression(human, options["expression"])
+    bones = wardrobe.hand_pose(human, options["hands"]) if "hands" in options else 0
+    return {"object": human.name, "added": [o.name for o in created], "posed_fingers": bones}

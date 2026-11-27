@@ -63,6 +63,7 @@ def surfaces(target="ALL"):
     else:
         obj = scene.objects[target]
         objects = [obj, *obj.children_recursive]
+        objects.extend(o for o in scene.objects if o.get("excad_wearer") == obj.name and o not in objects)
     custom_shapes = {bone.custom_shape for rig in scene.objects if rig.type == "ARMATURE"
                      for bone in rig.pose.bones if bone.custom_shape}
     graph = bpy.context.evaluated_depsgraph_get()

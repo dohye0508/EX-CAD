@@ -199,6 +199,21 @@ class EXCADSceneProps(PropertyGroup):
 # Human Operators
 # ---------------------------------------------------------------------------
 
+class EXCAD_OT_install_cc0_assets(Operator):
+    bl_idname = "excad.install_cc0_assets"
+    bl_label = "Install MakeHuman CC0 system assets"
+
+    def execute(self, context):
+        from .human_assets import install_asset_pack
+        try:
+            install_asset_pack()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "MakeHuman eyes, teeth, clothes and hair are available")
+        return {"FINISHED"}
+
+
 class EXCAD_OT_human_generate(Operator):
     bl_idname = "excad.human_generate"
     bl_label = "Generate Studio Human"
@@ -848,6 +863,7 @@ class VIEW3D_PT_excad_human(Panel):
         p = context.scene.excad
         engine_txt = "MPFB2 (MakeHuman Engine)" if human_engine.is_mpfb_available() else "Fallback SDF"
         layout.label(text=f"Engine: {engine_txt}", icon='OUTLINER_OB_ARMATURE')
+        layout.operator("excad.install_cc0_assets", icon="IMPORT")
 
         col = layout.column(align=True)
         col.prop(p, "human_preset")
@@ -1046,6 +1062,7 @@ class VIEW3D_PT_excad_bridge(Panel):
 CLASSES = (
     EXCADSceneProps,
     EXCAD_OT_human_generate,
+    EXCAD_OT_install_cc0_assets,
     EXCAD_OT_human_apply_target,
     EXCAD_OT_human_refit_rig,
     EXCAD_OT_auto_rig_mesh,

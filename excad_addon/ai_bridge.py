@@ -28,7 +28,9 @@ COMPACT_SCHEMA = (
     "STAGE; POSE name; PART type size; PROP type scale; STUDIO; CITY; STYLE; DIGEST. "
     "CAD: sketch_new/on_face/constraint, sketch_{arc,slot,regular_polygon,spline,offset_loop,mirror2d}; "
     "extrude/revolve/loft/sweep/fillet/chamfer/shell/pattern/mirror3d; "
-    "feature_tree{name,recipe}, save_feature_tree/rebuild_feature_tree. render_inspect{target?,views?}."
+    "feature_tree{name,recipe}, save_feature_tree/rebuild_feature_tree. render_inspect{target?,views?}. "
+    "Portrait: fit_face_from_image{object,image_path}, character_stylize{object,hair?,clothes?,skin?,expression?,hands?}, "
+    "install_asset_pack/equip_asset."
 )
 
 _POLY_MAP = {
@@ -428,6 +430,9 @@ class AiBridgeServer:
 
         if cmd == "character_stylize":
             obj = bpy.data.objects.get(data.get("object", "")) or bpy.context.active_object
+            if isinstance(data.get("hair"), str) or any(k in data for k in (
+                    "clothes", "skin", "lip_tint", "iris_color", "iris_size", "lashes", "teeth", "hands", "expression")):
+                return {"ok": True, **character_stylizer.style_character(obj, data)}
             objs = character_stylizer.stylize_portrait_character(
                 obj,
                 add_hair=bool(data.get("hair", True)),
@@ -436,6 +441,17 @@ class AiBridgeServer:
             )
             return {"ok": True, "object": obj.name, "added": [o.name for o in objs]}
 
+        if cmd == "fit_face_from_image":
+            from .face_fit import fit_face_from_image
+            return {"ok": True, **fit_face_from_image(bpy.context.scene.objects[data["object"]], data["image_path"])}
+        if cmd == "install_asset_pack":
+            from .human_assets import install_asset_pack
+            return {"ok": True, "path": str(install_asset_pack(data.get("pack", "system")))}
+        if cmd == "equip_asset":
+            from .human_assets import equip_asset
+            human = bpy.context.scene.objects[data.get("human") or data["object"]]
+            obj = equip_asset(human, data["name"], data.get("pack", "system"), data.get("subdiv", 0))
+            return {"ok": True, "name": obj.name}
         if cmd == "oneshot_city":
             objs = city_generator.generate_city(
                 grid_blocks=int(data.get("grid_blocks", 5)),
