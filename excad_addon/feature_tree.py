@@ -239,6 +239,27 @@ def replace_mesh(owner, body):
         bpy.data.meshes.remove(old)
 
 
+def _sweep_path(feature, placement, refresh=True):
+    """Keep named guides editable in the scene and retain the last successfully built path."""
+    path = feature["path_curve"]
+    if not isinstance(path, str):
+        feature.pop("path_reference", None)
+        return path
+    reference = feature.get("path_reference", {})
+    bound = reference.get("object") == path
+    available = path in bpy.data.objects
+    if bound and reference.get("points") and (not refresh or not available):
+        return reference["points"]
+    if not available:
+        raise ValueError(f"Unknown sweep guide {path}")
+    # Keep the guide in the feature's construction coordinates as the finished
+    # model is placed elsewhere. Capture this transform once when the guide is bound.
+    frame = Matrix(reference["world_to_model"]) if bound else placement.inverted()
+    points = [list(frame @ point) for point in geo.path_points(path)]
+    feature["path_reference"] = {"object": path, "world_to_model": [list(row) for row in frame], "points": points}
+    return points
+
+
 class FeatureTree:
     def __init__(self, name, recipe=None):
         self.name = name
@@ -293,8 +314,6 @@ class FeatureTree:
                         feature["sketch_ids"] = [new_name if n == name else n for n in ids]
                     else:
                         feature["sketch"] = new_name
-        if kind == "SWEEP" and isinstance(feature.get("path_curve"), str):
-            feature["path_curve"] = [list(p) for p in geo.path_points(feature["path_curve"])]
         feature.setdefault("id", f"F{len(self.recipe['features']) + 1}")
         self.recipe["features"].append(feature)
 
@@ -355,7 +374,7 @@ class FeatureTree:
                                 feature.get("steps", 4),
                             )
                         else:
-                            tool = geo.sweep(objects, docs[0], feature["path_curve"])
+                            tool = geo.sweep(objects, docs[0], _sweep_path(feature, current_placement))
                         op = feature.get("op", "ADD").upper()
                         if body is None:
                             if op != "ADD":
@@ -428,6 +447,10 @@ def save_recipe(obj, path):
     for sketch in raw.get("sketches", {}).values():
         if sketch.get("support") and sketch["support"]["object"] == obj.name:
             sketch["support"]["object"] = "SELF"
+    for feature in raw.get("features", []):
+        if feature["type"].upper() == "SWEEP":
+            feature["path_curve"] = _sweep_path(feature, Matrix.Identity(4), refresh=False)
+            feature.pop("path_reference", None)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf8", dir=path.parent, delete=False) as f:
         temp = f.name
         try:

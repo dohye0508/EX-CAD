@@ -261,6 +261,29 @@ for bevel in (0, 0.035):
     assert counts == (len(bpy.data.curves), len(bpy.data.shape_keys), len(bpy.data.objects))
 run("sweep", name="Taller handle", profile_sketch="profile", path_curve=path_obj.name)
 assert volume("Taller handle") > 1.15 * volume("Handle")
+tree(
+    "Guide rail", {"section": {"shapes": [{"type": "CIRCLE", "radius": 0.1}]}},
+    [{"id": "rail", "type": "SWEEP", "sketch": "section", "path_curve": path_obj.name}],
+)
+rail_volume = volume("Guide rail")
+assert math.isclose(rail_volume, volume("Taller handle"), rel_tol=1e-5)
+taller.value = 0
+portable = Path(bpy.app.tempdir) / "evaluated-rail.json"
+run("save_feature_tree", object="Guide rail", path=str(portable))
+exported = json.loads(portable.read_text())["features"][0]
+assert isinstance(exported["path_curve"], list) and "path_reference" not in exported
+assert abs(max(p[2] for p in exported["path_curve"]) - 0.74) < 1e-6
+run("rebuild_feature_tree", object="Guide rail")
+short_volume = volume("Guide rail")
+assert rail_volume > short_volume * 1.15
+bpy.data.objects.remove(path_obj, do_unlink=True)
+run("rebuild_feature_tree", name="Portable rail", path=str(portable))
+assert math.isclose(volume("Portable rail"), rail_volume, rel_tol=1e-5)
+run("rebuild_feature_tree", object="Guide rail", parameters={"sketches.section.shapes.0.radius": 0.12})
+assert math.isclose(volume("Guide rail"), short_volume * 1.2**2, rel_tol=1e-4)
+rejected = bridge._dispatch_dict({"cmd": "rebuild_feature_tree", "object": "Guide rail",
+                                  "parameters": {"rail.path_curve": "Different missing curve"}})
+assert not rejected["ok"] and math.isclose(volume("Guide rail"), short_volume * 1.2**2, rel_tol=1e-4)
 path = [[1, 0, 0], [0, 1, 0.45], [-1, 0, 0], [0, -1, -0.15], [1, 0, 0]]
 tree(
     "Closed tube",
@@ -285,6 +308,24 @@ mounted.matrix_world = Matrix.Rotation(0.4, 4, "Z")
 run("rebuild_feature_tree", object="Mounted", parameters={"pad.depth": 0.8})
 assert not mounted.ray_cast((-2, 0, 0.4), (1, 0, 0))[0]
 assert mounted.ray_cast((-2, 0, 0.65), (1, 0, 0))[0]
+# A guide drawn on a placed body lives in the current world frame. Later
+# placement of the finished part must carry the cut with it.
+drill = bpy.data.curves.new("Drill axis", "CURVE")
+drill.dimensions = "3D"
+axis = drill.splines.new("POLY")
+axis.points.add(1)
+for p, z in zip(axis.points, (-0.1, 1.1)):
+    p.co = (0.62, 0.28, z, 1)
+guide = bpy.data.objects.new(drill.name, drill)
+bpy.context.collection.objects.link(guide)
+guide.matrix_world = mounted.matrix_world
+sketch("drill bit")
+run("sketch_add_circle", radius=0.05)
+run("sweep", object="Mounted", profile_sketch="drill bit", path_curve=guide.name, op="CUT")
+assert not mounted.ray_cast((0.62, 0.28, 1), (0, 0, -1))[0]
+mounted.matrix_world = Matrix.Translation((3, 2, -1)) @ Matrix.Rotation(-0.8, 4, "Y")
+run("rebuild_feature_tree", object="Mounted", parameters={"pad.depth": 0.75})
+assert not mounted.ray_cast((0.62, 0.28, 1), (0, 0, -1))[0]
 sketch()
 run("sketch_add_circle", cu=1, radius=0.10)
 run("extrude", name="Bolts", depth=0.2)
