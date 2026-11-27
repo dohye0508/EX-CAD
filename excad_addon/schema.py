@@ -40,7 +40,7 @@ TOPICS = {
         "place_relative{obj,target?,relation,gap?} ON_TOP_OF|LEFT_OF|RIGHT_OF|IN_FRONT_OF|BEHIND|INSIDE|ALIGN_FLOOR. "
         "look_at{obj,target}; scatter_on_surface{asset,surface_obj,count,min_dist,align_normal?,seed?}; "
         "check_intersections{objects?}; resolve_overlaps{objects?,fixed?,gap?}; set_material{object,preset,color?,roughness?,metallic?}; "
-        "light_studio{target,style?:PRODUCT|PORTRAIT|SOFT,power?}; render_inspect{target?,views?,path?,size?}; "
+        "light_studio{target,style?:PRODUCT|PORTRAIT|SOFT|HEADSHOT,power?}; HEADSHOT frames the posed face with a camera. render_inspect{target?,views?,path?,size?}; "
         "checkpoint{name}; rollback{name}; undo{}; reload_addon{}; scene_digest{since_hash?,include_all?}."
     ),
 }

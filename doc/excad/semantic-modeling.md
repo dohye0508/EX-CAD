@@ -74,6 +74,8 @@ assert edited["ok"], edited
 
 겉옷만 벗기려면 `{"cmd":"character_stylize","object":"Portrait","remove":["outerwear"]}`를 보낸다. 재킷 아래에 가려졌던 티셔츠나 스웨터가 다시 드러난다. 긴 머리는 머리 본을 따라 움직이며, 어깨를 올리면 Geometry Nodes가 현재 포즈의 옷 표면에 맞춰 머리끝을 조정한다.
 
+상반신을 촬영하려면 `{"cmd":"light_studio","target":"Portrait","style":"HEADSHOT"}`을 보낸다. 현재 포즈의 양쪽 눈 위치와 간격을 기준으로 86 mm 카메라와 세 개의 소프트박스를 배치한다. 인물을 회전하거나 다른 포즈를 적용한 뒤 같은 명령을 보내면 기존 카메라와 조명을 다시 맞춘다. Blender에서 F12를 누르면 현재 렌더 엔진으로 촬영한다. 빠른 네 방향 검수에는 `render_inspect`를 사용한다.
+
 ## SDF, 다면 투영과 외부 3D 생성
 
 ```json
@@ -132,6 +134,7 @@ Hunyuan3D-2의 모델 라이선스는 한국·EU·영국을 적용 지역에서 
 ```powershell
 cmd /c install_blender_addon.bat
 $blenderExe = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
+$env:EXCAD_TEST_VARIANTS = Join-Path $env:TEMP 'excad-character-variants'
 foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view_capture', 'import_rig', 'layout', 'dense_layout') {
     & $blenderExe -b --factory-startup --python-exit-code 1 --python "tests/excad/$suite.py"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -140,6 +143,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/overlay.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/surface_transfer.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/sdf_rebuild.py
+& $blenderExe -b (Join-Path $env:EXCAD_TEST_VARIANTS 'dressed.blend') --python-exit-code 1 --python tests/excad/portrait_render.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py
 & $blenderExe -b --factory-startup --python-exit-code 1 --python tests/excad/wardrobe_motion.py -- 81128002 81128003 81128007 81128018 81128021
 ```
@@ -151,7 +155,7 @@ foreach ($suite in 'protocol', 'cad', 'character', 'organic', 'multiview', 'view
 | 모델 | 확인할 수 있는 부분 |
 | --- | --- |
 | [파라메트릭 플레이트](previews/phase1-cad.png) · [스케치 오버레이](previews/phase1-sketch-overlay.png) | 장공과 모서리 가공, 고정 도형과 자유 도형의 선색, 치수 |
-| [사진에 맞춘 인물](previews/phase2-character.png) | MPFB 얼굴 모프, 포니테일, 셔츠·바지·신발의 피팅 |
+| [사진에 맞춘 인물](previews/phase2-character.png) · [Cycles 상반신 렌더](previews/phase2-portrait.png) | MPFB 얼굴 모프, 홍채와 각막, 피부·헤어 셰이더, 셔츠·바지·신발의 피팅 |
 | [SDF 꽃병](previews/phase3-sdf.png) · [20면 UV 복원](previews/phase3-uv.png) | 용기의 열린 입구와 내부 형상, 비대칭 유약 무늬의 정렬 |
 | [TRELLIS 입력](previews/trellis-reference.png) · [실제 생성 결과](previews/trellis-generated.png) | Cycles로 렌더한 꽃병에서 생성한 GLB. 색상은 반영됐으며 좁은 목과 굴곡은 원통에 가깝게 단순화됐다. |
 | [받침대 위 화분](previews/phase4-layout.png) | 서로 다른 두 물체의 접지, 목재와 도자기 재질, 스튜디오 조명 |

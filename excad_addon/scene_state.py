@@ -102,7 +102,7 @@ def rows(include_all=False):
     images = {}
     for obj in sorted(bpy.context.scene.objects, key=lambda o: o.name):
         if (not include_all and obj.type in {"CAMERA", "LIGHT"}
-                and not obj.get("excad_light") and "excad_view_index" not in obj):
+                and not obj.get("excad_light") and not obj.get("excad_headshot") and "excad_view_index" not in obj):
             continue
         ev = obj.evaluated_get(graph)
         h = hashlib.blake2s(digest_size=8)
@@ -164,7 +164,8 @@ def rows(include_all=False):
         elif ev.type == "CAMERA":
             camera = ev.data
             _feed(h, [camera.type, camera.lens, camera.ortho_scale, camera.clip_start, camera.clip_end,
-                      camera.shift_x, camera.shift_y])
+                      camera.shift_x, camera.shift_y, camera.sensor_fit, camera.sensor_width, camera.sensor_height,
+                      obj == bpy.context.scene.camera])
         result.append(
             [
                 obj.name,

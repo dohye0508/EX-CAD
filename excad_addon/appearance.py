@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Semantic finishes and a three-point light rig framed from the subject's evaluated bounds."""
 
+import math
+
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 from .scene_layout import bounds
 
@@ -56,37 +58,105 @@ def _finish(obj, preset, color, roughness, metallic):
     return mat.name
 
 
+def _head_frame(subject):
+    from .wardrobe import _eye_centers, rest_mesh
+
+    eyes = [o for o in bpy.context.scene.objects if o.get("excad_human") == subject and "excad_eye_center" in o]
+    if len(eyes) == 2:
+        centers = [Vector(o["excad_eye_center"]) for o in eyes]
+    else:
+        if subject.type != "MESH" or not any(name in subject.vertex_groups for name in ("helper-l-eye", "l-eye")):
+            raise ValueError("HEADSHOT requires a character with fitted eyes or MPFB eye landmarks")
+        with rest_mesh(subject) as mesh:
+            centers = _eye_centers(subject, mesh)
+    frame = subject.matrix_world.copy()
+    rig = subject.find_armature()
+    if rig and rig.data.pose_position != "REST":
+        head = next((b for b in rig.pose.bones if b.name.lower().split(":")[-1] in {"head", "mixamorighead"}), None)
+        if head:
+            frame = (
+                rig.matrix_world @ head.matrix @ head.bone.matrix_local.inverted() @ rig.matrix_world.inverted() @ frame
+            )
+    left, right = [frame @ center for center in centers]
+    span = (left - right).length
+    if span < 1e-6:
+        raise ValueError("Eye landmarks are coincident")
+    orient = frame.to_3x3()
+    front = (orient @ Vector((0, -1, 0))).normalized()
+    up = (orient @ Vector((0, 0, 1))).normalized()
+    rightward = front.cross(up) * -1
+    rightward.normalize()
+    up = front.cross(rightward).normalized()
+    basis = Matrix((rightward, -front, up)).transposed()
+    return (left + right) / 2, basis, span
+
+
+def _studio_part(subject, role):
+    camera = role == "Camera"
+    kind, marker = ("CAMERA", "excad_headshot") if camera else ("LIGHT", "excad_light")
+    for obj in bpy.context.scene.objects:
+        if obj.type != kind or obj.get(marker) != role:
+            continue
+        owner = obj.get("excad_studio_target")
+        if owner == subject or (owner is None and obj.get("excad_subject") == subject.name):
+            break
+    else:
+        name = subject.name + " " + role
+        data = bpy.data.cameras.new(name) if camera else bpy.data.lights.new(name, "AREA")
+        obj = bpy.data.objects.new(name, data)
+        bpy.context.collection.objects.link(obj)
+    if obj.data.users > 1:
+        obj.data = obj.data.copy()
+    obj["excad_subject"], obj["excad_studio_target"], obj[marker] = subject.name, subject, role
+    return obj
+
+
 def light_studio(target, style="PRODUCT", power=1.0):
-    if style not in {"PRODUCT", "PORTRAIT", "SOFT"} or power <= 0:
-        raise ValueError("Use PRODUCT, PORTRAIT or SOFT with positive power")
-    obj = bpy.context.scene.objects[target]
-    bb = bounds(obj)
-    center = Vector(bb.mean(0))
-    extent = max(float(max(bb[1] - bb[0])), 0.01)
-    lights = []
-    for role, direction, energy, diameter in (
-        ("Key", (-1.5, -2, 2.4), 420, 1.25),
-        ("Fill", (2, -1, 1.3), 220, 1.6),
-        ("Rim", (0.8, 1.5, 1.8), 330, 0.9),
-    ):
-        lamp = next(
-            (
-                o
-                for o in bpy.context.scene.objects
-                if o.type == "LIGHT" and o.get("excad_subject") == target and o.get("excad_light") == role
-            ),
-            None,
+    if style not in {"PRODUCT", "PORTRAIT", "SOFT", "HEADSHOT"} or not math.isfinite(power) or power <= 0:
+        raise ValueError("Use PRODUCT, PORTRAIT, SOFT or HEADSHOT with positive power")
+    subject = bpy.context.scene.objects[target]
+    if style == "HEADSHOT":
+        bpy.context.view_layer.update()
+        center, basis, extent = _head_frame(subject)
+        setup = (
+            ("Key", (-5.5, -7.4, 5.2), 10.5 / 0.06**2, 5.2, (1.0, 0.91, 0.82)),
+            ("Fill", (5.6, -7, 2.1), 3.0 / 0.06**2, 6.8, (0.81, 0.9, 1.0)),
+            ("Rim", (3.5, 5.8, 5.5), 5.0 / 0.06**2, 4.0, (1.0, 0.92, 0.83)),
         )
-        if lamp is None:
-            data = bpy.data.lights.new(target + " " + role, "AREA")
-            lamp = bpy.data.objects.new(data.name, data)
-            bpy.context.collection.objects.link(lamp)
-        lamp["excad_subject"], lamp["excad_light"] = target, role
-        lamp.location = center + Vector(direction) * extent
+    else:
+        bb = bounds(subject)
+        center, basis = Vector(bb.mean(0)), Matrix.Identity(3)
+        extent = max(float(max(bb[1] - bb[0])), 0.01)
+        setup = (
+            ("Key", (-1.5, -2, 2.4), 420, 1.25, (1, 0.86, 0.74) if style == "PORTRAIT" else (1, 1, 1)),
+            ("Fill", (2, -1, 1.3), 220, 1.6, (1, 1, 1)),
+            ("Rim", (0.8, 1.5, 1.8), 330, 0.9, (1, 1, 1)),
+        )
+    lights = []
+    for role, direction, energy, diameter, color in setup:
+        lamp = _studio_part(subject, role)
+        lamp.location = center + basis @ Vector(direction) * extent
         lamp.rotation_euler = (center - lamp.location).to_track_quat("-Z", "Y").to_euler()
         lamp.data.shape = "DISK"
         lamp.data.size = extent * diameter * (1.8 if style == "SOFT" else 1)
         lamp.data.energy = energy * extent**2 * power
-        lamp.data.color = (1, 0.86, 0.74) if style == "PORTRAIT" and role == "Key" else (1, 1, 1)
+        lamp.data.color = color
         lights.append(lamp.name)
+    if style == "HEADSHOT":
+        focus = center + basis @ Vector((0, 0, -1.40)) * extent
+        camera = _studio_part(subject, "Camera")
+        camera.location = focus + basis @ Vector((3.6, -21.5, 0.8)) * extent
+        back = (camera.location - focus).normalized()
+        right = basis.col[2].cross(back).normalized()
+        camera.rotation_euler = Matrix((right, back.cross(right), back)).transposed().to_euler()
+        camera.data.type, camera.data.lens, camera.data.sensor_fit, camera.data.sensor_height = (
+            "PERSP",
+            86,
+            "VERTICAL",
+            32,
+        )
+        camera.data.clip_start = max(0.0001, extent * 0.08)
+        camera.data.clip_end = max(100.0, extent * 100)
+        bpy.context.scene.camera = camera
+        return {"lights": lights, "camera": camera.name}
     return {"lights": lights}
