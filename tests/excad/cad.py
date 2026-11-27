@@ -246,6 +246,21 @@ path_obj = bpy.data.objects.new("HandlePath", curve)
 bpy.context.collection.objects.link(path_obj)
 run("sweep", name="Handle", profile_sketch="profile", path_curve=path_obj.name)
 assert volume("Handle") > 0.04
+path_obj.shape_key_add(name="Basis")
+taller = path_obj.shape_key_add(name="Taller path")
+for index in (1, 2):
+    taller.data[index].co.z += 0.24
+taller.value = 1
+path_obj.location.x = 0.3
+for bevel in (0, 0.035):
+    curve.bevel_depth = bevel
+    counts = len(bpy.data.curves), len(bpy.data.shape_keys), len(bpy.data.objects)
+    evaluated = feature_geometry.path_points(path_obj.name)
+    assert len(evaluated) == 4 and abs(max(p.z for p in evaluated) - 0.74) < 1e-6
+    assert abs(evaluated[0].x - 0.3) < 1e-6 and abs(evaluated[-1].x - 1.3) < 1e-6
+    assert counts == (len(bpy.data.curves), len(bpy.data.shape_keys), len(bpy.data.objects))
+run("sweep", name="Taller handle", profile_sketch="profile", path_curve=path_obj.name)
+assert volume("Taller handle") > 1.15 * volume("Handle")
 path = [[1, 0, 0], [0, 1, 0.45], [-1, 0, 0], [0, -1, -0.15], [1, 0, 0]]
 tree(
     "Closed tube",

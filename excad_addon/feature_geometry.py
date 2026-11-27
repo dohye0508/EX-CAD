@@ -275,49 +275,59 @@ def loft(objects, docs, segments=64, interpolation="SMOOTH", steps=4):
     return skin_sections(objects, base, rings, end_profiles=end)
 
 
+def _wire_path(obj):
+    bpy.context.view_layer.update()
+    evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    try:
+        neighbors = [[] for _ in mesh.vertices]
+        for edge in mesh.edges:
+            a, b = edge.vertices
+            neighbors[a].append(b)
+            neighbors[b].append(a)
+        ends = [i for i, adjacent in enumerate(neighbors) if len(adjacent) == 1]
+        if (
+            not neighbors or mesh.polygons or len(ends) not in (0, 2)
+            or any(len(adjacent) not in (1, 2) for adjacent in neighbors)
+        ):
+            raise ValueError("Evaluated sweep path must be a single unbranched curve")
+        index, previous = ends[0] if ends else 0, None
+        visited, ordered = set(), []
+        while index is not None and index not in visited:
+            ordered.append(evaluated.matrix_world @ mesh.vertices[index].co)
+            visited.add(index)
+            onward = [other for other in neighbors[index] if other != previous]
+            previous, index = index, min(onward, default=None)
+        if len(visited) != len(neighbors):
+            raise ValueError("Evaluated sweep path has disconnected components")
+        if not ends:
+            ordered.append(ordered[0].copy())
+        return ordered
+    finally:
+        evaluated.to_mesh_clear()
+
+
 def path_points(path):
     if not isinstance(path, str):
         return [Vector(p) for p in path]
     obj = bpy.data.objects[path]
     if obj.type != "CURVE" or len(obj.data.splines) != 1:
         raise ValueError("Sweep requires a single curve spline")
-    spline = obj.data.splines[0]
-    if spline.type == "BEZIER":
-        pts = spline.bezier_points
-        sampled = []
-        for i in range(len(pts) - 1 + int(spline.use_cyclic_u)):
-            a, b = pts[i], pts[(i + 1) % len(pts)]
-            sampled.extend(
-                geometry.interpolate_bezier(a.co, a.handle_right, b.handle_left, b.co, max(3, spline.resolution_u + 1))[
-                    :-1
-                ]
-            )
-        sampled.append(pts[0 if spline.use_cyclic_u else -1].co)
-    elif spline.type == "POLY":
-        sampled = [Vector(p.co[:3]) for p in spline.points]
-        if spline.use_cyclic_u:
-            sampled.append(sampled[0])
-    else:
-        data = obj.data.copy()
-        data.bevel_depth, data.extrude = 0, 0
-        data.bevel_mode = "ROUND"
-        data.dimensions = "3D"
-        temp = bpy.data.objects.new("EXCAD_CurveEvaluation", data)
+    curve = obj.data
+    if curve.dimensions == "3D" and not (curve.bevel_depth or curve.extrude or curve.bevel_object):
+        return _wire_path(obj)
+    # Evaluate the guide without its decorative thickness. Copying the object
+    # retains its deformers and copying its data preserves the current shape keys.
+    temp = obj.copy()
+    data = curve.copy()
+    try:
+        temp.data = data
+        data.bevel_mode, data.bevel_depth, data.extrude, data.dimensions = "ROUND", 0, 0, "3D"
         bpy.context.collection.objects.link(temp)
-        try:
-            bpy.context.view_layer.update()
-            evaluated = temp.evaluated_get(bpy.context.evaluated_depsgraph_get())
-            mesh = evaluated.to_mesh()
-            try:
-                sampled = [v.co.copy() for v in mesh.vertices]
-            finally:
-                evaluated.to_mesh_clear()
-            if spline.use_cyclic_u:
-                sampled.append(sampled[0])
-        finally:
-            bpy.data.objects.remove(temp, do_unlink=True)
-            bpy.data.curves.remove(data)
-    return [obj.matrix_world @ p for p in sampled]
+        return _wire_path(temp)
+    finally:
+        bpy.data.objects.remove(temp, do_unlink=True)
+        bpy.data.curves.remove(data)
 
 
 def sweep(objects, doc, path_curve):
